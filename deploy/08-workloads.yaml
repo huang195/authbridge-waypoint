@@ -1,0 +1,103 @@
+---
+# echo-agent: the "agent" that calls the tool
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-agent
+  namespace: agent-ns
+  labels:
+    app: echo-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: echo-agent
+  template:
+    metadata:
+      labels:
+        app: echo-agent
+    spec:
+      containers:
+        - name: echo-agent
+          image: localhost:5000/echo-agent:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          env:
+            - name: TOOL_URL
+              value: "http://echo-tool.tool-ns.svc.cluster.local:8080/echo"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            requests:
+              memory: 32Mi
+              cpu: 25m
+            limits:
+              memory: 64Mi
+              cpu: 100m
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo-agent
+  namespace: agent-ns
+spec:
+  selector:
+    app: echo-agent
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+# echo-tool: the "tool" that echoes headers
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-tool
+  namespace: tool-ns
+  labels:
+    app: echo-tool
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: echo-tool
+  template:
+    metadata:
+      labels:
+        app: echo-tool
+    spec:
+      containers:
+        - name: echo-tool
+          image: localhost:5000/echo-tool:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            requests:
+              memory: 32Mi
+              cpu: 25m
+            limits:
+              memory: 64Mi
+              cpu: 100m
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo-tool
+  namespace: tool-ns
+spec:
+  selector:
+    app: echo-tool
+  ports:
+    - port: 8080
+      targetPort: 8080

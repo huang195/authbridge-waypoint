@@ -1,0 +1,25 @@
+---
+# agent-ns: ambient mode enabled
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agent-ns
+  labels:
+    istio.io/dataplane-mode: ambient
+---
+# tool-ns: ambient mode + waypoint
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: tool-ns
+  labels:
+    istio.io/dataplane-mode: ambient
+    istio.io/use-waypoint: tool-waypoint
+---
+# kagenti-system: where the shared token-exchange-service runs
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kagenti-system
+  labels:
+    istio.io/dataplane-mode: ambient

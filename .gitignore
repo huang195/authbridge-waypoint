@@ -1,0 +1,4 @@
+bin/
+/echo-agent
+/echo-tool
+/token-exchange-service

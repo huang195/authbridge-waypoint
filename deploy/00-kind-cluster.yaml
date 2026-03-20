@@ -1,0 +1,14 @@
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: waypoint-poc
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      # Keycloak
+      - containerPort: 30080
+        hostPort: 9080
+        protocol: TCP
+      # NodePort for testing
+      - containerPort: 30081
+        hostPort: 9081
+        protocol: TCP
