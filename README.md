@@ -116,17 +116,43 @@ The setup script (`deploy/03-keycloak-setup.sh`) configures kagenti's Keycloak u
 
 No legacy feature flags (`--features=token-exchange,admin-fine-grained-authz`) or fine-grained admin permissions are needed.
 
-## Validated Results
+## End-to-End Tests
 
-| Risk | Status | Finding |
-|------|--------|---------|
-| Does ext_authz `headers_to_set` replace the Authorization header? | **Confirmed** | Tool received the exchanged token, not the agent's original |
-| Does CUSTOM AuthorizationPolicy trigger on the waypoint (not ztunnel)? | **Confirmed** | ext_authz logs show validation + exchange on each request |
-| Does the waypoint forward the original Authorization header? | **Confirmed** | CheckRequest includes the agent's JWT for validation |
-| Cross-namespace connectivity (kagenti-system -> keycloak) | **Confirmed** | Token exchange service reaches Keycloak across namespaces |
-| Latency | **Not yet benchmarked** | Qualitatively fast; cache-hit path skips Keycloak entirely |
+The tests validate the waypoint token exchange using a curl pod in `agent-ns` that calls `echo-tool` through the waypoint:
 
-### Discovered Constraints
+```
+curl pod (agent-ns)                          echo-tool (tool-ns)
+     │                                            ▲
+     │  GET /echo                                 │
+     │  Authorization: Bearer <token>             │
+     ▼                                            │
+  ztunnel ──── L4 mTLS ────> waypoint ────────────┘
+                               │
+                ┌──────────────┴──────────────────┐
+                │  1. CUSTOM AuthorizationPolicy   │
+                │     → ext_authz gRPC call        │
+                │     → token-exchange-service     │
+                │       • validate JWT (JWKS)      │
+                │       • exchange token (RFC 8693)│
+                │       • replace Authorization    │
+                │                                  │
+                │  2. ALLOW AuthorizationPolicy    │
+                │     → only agent-ns permitted    │
+                └─────────────────────────────────┘
+```
+
+`echo-tool` returns all received headers as JSON, allowing the test to inspect the `Authorization` header and verify whether token exchange occurred.
+
+| Test | Input | Expected |
+|------|-------|----------|
+| **Invalid token rejected** | `Authorization: Bearer invalid-token-12345` | HTTP 401/403 — waypoint rejects via ext_authz |
+| **Valid token exchanged** | `Authorization: Bearer <agent-jwt>` | HTTP 200 — tool receives token with `aud=echo-tool`, not the agent's original |
+
+```bash
+make test
+```
+
+## Known Constraints
 
 - **CUSTOM action does not support `from.source.namespaces`** — Istio validation rejects it. Use a separate ALLOW policy for namespace filtering (defense-in-depth).
 - **Keycloak token issuer URL may differ from internal service URL** — The `iss` claim uses the external hostname (e.g., `keycloak.localtest.me`). The token-exchange-service needs a separate `ISSUER_URL` config for JWT validation while using the internal URL for API calls.
