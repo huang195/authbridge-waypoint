@@ -25,6 +25,8 @@ A proof-of-concept that replaces Kagenti's AuthBridge sidecar architecture (5 co
                                               ▼
                                     ┌──────────────────────┐
                                     │ Keycloak (RFC 8693)  │
+                                    │ Standard Token       │
+                                    │ Exchange V2          │
                                     └──────────────────────┘
 ```
 
@@ -39,21 +41,33 @@ A proof-of-concept that replaces Kagenti's AuthBridge sidecar architecture (5 co
 | Token exchange | Per-pod sidecar | Shared waypoint ext_authz |
 | Access control | Sidecar code | Declarative AuthorizationPolicy CRs |
 
+## Prerequisites
+
+This project assumes a **kagenti cluster** is already deployed locally, providing:
+
+- **Kind cluster** named `kagenti` (override with `CLUSTER_NAME=<name>`)
+- **Istio ambient mesh** with the `kagenti-token-exchange` ext_authz provider configured
+- **Keycloak 26+** running in the `keycloak` namespace (service: `keycloak-service`)
+- **`kagenti-system` namespace** for shared infrastructure
+
+See the [kagenti repository](https://github.com/kagenti/kagenti) for cluster setup instructions.
+
 ## Quick Start
 
 ```bash
-# Prerequisites: kind, istioctl, kubectl, docker, jq
-
 # Full setup + deploy + test
 make all
 
 # Or step by step:
-make setup    # Kind cluster + Istio ambient + Keycloak
-make deploy   # Build images + deploy workloads
+make setup    # Configure Keycloak realm/clients, deploy namespaces + waypoint
+make deploy   # Build images, load into Kind, deploy workloads
 make test     # Run E2E validation
 
-# Cleanup
+# Cleanup (removes deployed resources, keeps the kagenti cluster)
 make teardown
+
+# See all targets
+make help
 ```
 
 ## Components
@@ -63,6 +77,18 @@ make teardown
 | `echo-tool` | `cmd/echo-tool/` | HTTP server that echoes request headers (the "tool") |
 | `echo-agent` | `cmd/echo-agent/` | HTTP client that calls echo-tool with JWT (the "agent") |
 | `token-exchange-service` | `cmd/token-exchange-service/` | ext_authz gRPC service: JWT validation + RFC 8693 token exchange |
+
+## Deploy Manifests
+
+| File | Description |
+|------|-------------|
+| `deploy/03-keycloak-setup.sh` | Creates waypoint-poc realm, clients, enables standard token exchange, adds audience mappers |
+| `deploy/04-namespaces.yaml` | Creates `agent-ns` and `tool-ns` with Istio ambient labels |
+| `deploy/05-token-exchange-svc.yaml` | Deploys token-exchange-service in `kagenti-system` |
+| `deploy/06-waypoint.yaml` | Waypoint Gateway for `tool-ns` |
+| `deploy/07-istio-policies.yaml` | CUSTOM (ext_authz) and ALLOW (namespace filter) AuthorizationPolicies |
+| `deploy/08-workloads.yaml` | echo-agent and echo-tool Deployments + Services |
+| `deploy/09-test.sh` | End-to-end validation script |
 
 ## How It Works
 
@@ -78,22 +104,31 @@ make teardown
 6. Waypoint replaces the `Authorization` header and forwards to echo-tool
 7. Echo-tool receives the request with `aud: echo-tool` token (not the agent's original)
 
-## Validated Results
+## Keycloak Configuration
 
-All key risks from the design phase have been tested on a Kind cluster with Istio 1.24 ambient mesh:
+The setup script (`deploy/03-keycloak-setup.sh`) configures kagenti's Keycloak using the **Standard Token Exchange V2** (Keycloak 26+ built-in, no feature flags required):
+
+1. **Creates realm** `waypoint-poc` with three clients: `echo-agent`, `echo-tool`, `token-exchange-service`
+2. **Enables standard token exchange** (`standard.token.exchange.enabled`) on `token-exchange-service` and `echo-tool`
+3. **Adds audience mappers**:
+   - `echo-agent` tokens include `token-exchange-service` in the audience (so the exchange service can present them as `subject_token`)
+   - `token-exchange-service` lists `echo-tool` as a valid audience target
+
+No legacy feature flags (`--features=token-exchange,admin-fine-grained-authz`) or fine-grained admin permissions are needed.
+
+## Validated Results
 
 | Risk | Status | Finding |
 |------|--------|---------|
 | Does ext_authz `headers_to_set` replace the Authorization header? | **Confirmed** | Tool received the exchanged token, not the agent's original |
 | Does CUSTOM AuthorizationPolicy trigger on the waypoint (not ztunnel)? | **Confirmed** | ext_authz logs show validation + exchange on each request |
 | Does the waypoint forward the original Authorization header? | **Confirmed** | CheckRequest includes the agent's JWT for validation |
-| Cross-namespace connectivity (kagenti-system → keycloak) | **Confirmed** | Token exchange service reaches Keycloak across namespaces |
+| Cross-namespace connectivity (kagenti-system -> keycloak) | **Confirmed** | Token exchange service reaches Keycloak across namespaces |
 | Latency | **Not yet benchmarked** | Qualitatively fast; cache-hit path skips Keycloak entirely |
 
 ### Discovered Constraints
 
 - **CUSTOM action does not support `from.source.namespaces`** — Istio validation rejects it. Use a separate ALLOW policy for namespace filtering (defense-in-depth).
-- **Keycloak 26 requires explicit feature versions** — `admin-fine-grained-authz:v1` (with `:v1`) must be specified; without the version suffix, Keycloak silently ignores it.
 - **Keycloak token issuer URL may differ from internal service URL** — The `iss` claim uses the external hostname (e.g., `keycloak.localtest.me`). The token-exchange-service needs a separate `ISSUER_URL` config for JWT validation while using the internal URL for API calls.
 - **Distroless images have no shell** — The test script uses a curl debug pod in agent-ns instead of `kubectl exec` into the workload pod.
 
