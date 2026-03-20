@@ -40,6 +40,7 @@ KEYCLOAK_SVC="${KEYCLOAK_SVC:-keycloak-service}"
 KEYCLOAK_NS="${KEYCLOAK_NS:-keycloak}"
 REALM="waypoint-poc"
 AGENT_URL="http://echo-agent.agent-ns.svc.cluster.local:8080/call-tool"
+INVALID_TOKEN="invalid-token-12345"
 PASS=0
 FAIL=0
 PF_PID=""
@@ -123,47 +124,23 @@ kubectl wait --for=condition=ready pod -l app=echo-agent -n agent-ns --timeout=6
 kubectl wait --for=condition=ready pod -l app=echo-tool -n tool-ns --timeout=60s
 kubectl wait --for=condition=ready pod -l app=token-exchange-service -n kagenti-system --timeout=60s
 
-# ---------- Get user token from Keycloak ----------
-
-info "Obtaining user token from Keycloak (aud=echo-agent)..."
-kubectl port-forward -n "$KEYCLOAK_NS" "svc/$KEYCLOAK_SVC" 18080:8080 &
-PF_PID=$!
-sleep 3
-
-KC_TOKEN_URL="http://localhost:18080/realms/$REALM/protocol/openid-connect/token"
-USER_TOKEN=$(curl -sf -X POST "$KC_TOKEN_URL" \
-  -d "grant_type=client_credentials" \
-  -d "client_id=echo-agent" \
-  -d "client_secret=agent-secret" | jq -r '.access_token')
-
-if [[ -z "$USER_TOKEN" || "$USER_TOKEN" == "null" ]]; then
-  fail "Could not obtain user token from Keycloak"
-  exit 1
-fi
-
-USER_AUD=$(jwt_payload "$USER_TOKEN" | jq -r 'if .aud | type == "array" then (.aud | join(", ")) else (.aud // "n/a") end')
-USER_AZP=$(jwt_payload "$USER_TOKEN" | jq -r '.azp // "n/a"')
-USER_SUB=$(jwt_payload "$USER_TOKEN" | jq -r '.sub // "n/a"')
-
-info "User token obtained"
-print_token_info "User token (before exchange)" "$USER_TOKEN"
-
 # ==========================================================================
 # Test 1: Invalid token is rejected
 # ==========================================================================
 
 echo ""
 info "Test 1: Invalid token is rejected"
-detail "User sends invalid token to echo-agent → echo-agent forwards to echo-tool"
-detail "→ waypoint ext_authz rejects (JWT parsing/signature validation fails)"
+detail "Token: Bearer $INVALID_TOKEN"
+detail "This is not a valid JWT — no header, payload, or signature."
+detail "User sends it to echo-agent → echo-agent forwards to echo-tool"
+detail "→ waypoint ext_authz rejects (JWT validation fails)"
 echo ""
 
-run_curl "curl-invalid" "Bearer invalid-token-12345"
+run_curl "curl-invalid" "Bearer $INVALID_TOKEN"
 
 TOOL_STATUS=$(echo "$CURL_BODY" | jq -r '.tool_status // empty' 2>/dev/null)
 
 if [[ -z "$TOOL_STATUS" ]]; then
-  # echo-agent might have returned an error before reaching the tool
   detail "Response: $CURL_BODY"
   AGENT_ERROR=$(echo "$CURL_BODY" | jq -r '.error // empty' 2>/dev/null)
   if [[ -n "$AGENT_ERROR" ]]; then
@@ -190,9 +167,34 @@ fi
 
 echo ""
 info "Test 2: Valid token is exchanged and accepted"
-detail "User sends token (aud=$USER_AUD, azp=$USER_AZP) to echo-agent"
-detail "→ echo-agent forwards to echo-tool → waypoint exchanges via RFC 8693"
-detail "→ echo-tool receives new token with aud=echo-tool"
+
+# Obtain a user token from Keycloak (out-of-band, aud=echo-agent)
+detail "Obtaining user token from Keycloak..."
+kubectl port-forward -n "$KEYCLOAK_NS" "svc/$KEYCLOAK_SVC" 18080:8080 &
+PF_PID=$!
+sleep 3
+
+KC_TOKEN_URL="http://localhost:18080/realms/$REALM/protocol/openid-connect/token"
+USER_TOKEN=$(curl -sf -X POST "$KC_TOKEN_URL" \
+  -d "grant_type=client_credentials" \
+  -d "client_id=echo-agent" \
+  -d "client_secret=agent-secret" | jq -r '.access_token')
+
+if [[ -z "$USER_TOKEN" || "$USER_TOKEN" == "null" ]]; then
+  fail "Could not obtain user token from Keycloak"
+  exit 1
+fi
+
+USER_AUD=$(jwt_payload "$USER_TOKEN" | jq -r 'if .aud | type == "array" then (.aud | join(", ")) else (.aud // "n/a") end')
+USER_AZP=$(jwt_payload "$USER_TOKEN" | jq -r '.azp // "n/a"')
+USER_SUB=$(jwt_payload "$USER_TOKEN" | jq -r '.sub // "n/a"')
+
+echo ""
+print_token_info "User token (before exchange)" "$USER_TOKEN"
+echo ""
+detail "User sends this token to echo-agent → echo-agent forwards to echo-tool"
+detail "→ waypoint ext_authz validates JWT, exchanges via RFC 8693"
+detail "→ echo-tool should receive a new token with aud=echo-tool"
 echo ""
 
 run_curl "curl-valid" "Bearer $USER_TOKEN"
@@ -213,7 +215,6 @@ else
   else
     RECEIVED_TOKEN=$(echo "$RECEIVED_AUTH" | sed 's/Bearer //')
 
-    echo ""
     print_token_info "Token received by echo-tool (after exchange)" "$RECEIVED_TOKEN"
     echo ""
 
