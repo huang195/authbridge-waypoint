@@ -1,7 +1,8 @@
 // echo-agent is a minimal HTTP service that acts as the "agent" in the
-// agent→tool flow. It calls echo-tool with an Authorization header and
-// returns the tool's response. The token it sends is the agent's own JWT;
-// the waypoint's ext_authz should exchange it before it reaches the tool.
+// user→agent→tool flow. A user calls /call-tool with a token (aud=echo-agent).
+// The agent forwards the token to echo-tool. The waypoint's ext_authz
+// intercepts the request, validates the JWT, and exchanges it for a
+// tool-scoped token (aud=echo-tool) before the request reaches echo-tool.
 package main
 
 import (

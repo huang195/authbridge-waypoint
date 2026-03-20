@@ -159,8 +159,11 @@ add_audience_mapper() {
 AGENT_UUID=$(get_client_uuid "echo-agent")
 EXCHANGE_UUID=$(get_client_uuid "token-exchange-service")
 
-# Agent tokens must include token-exchange-service in the audience so the
-# exchange service can present them as subject_token.
+# Agent tokens include echo-agent as their primary audience (the token owner).
+add_audience_mapper "$AGENT_UUID" "echo-agent-audience" "echo-agent"
+
+# Agent tokens must also include token-exchange-service in the audience so the
+# exchange service can present them as subject_token in the standard token exchange.
 add_audience_mapper "$AGENT_UUID" "token-exchange-service-audience" "token-exchange-service"
 
 # token-exchange-service must list echo-tool as a valid audience so Keycloak

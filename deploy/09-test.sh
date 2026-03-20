@@ -3,37 +3,43 @@
 #
 # Test architecture:
 #
-#   curl pod (agent-ns)
-#        │
-#        │  GET /echo  +  Authorization: Bearer <token>
-#        ▼
+#   User (curl pod, agent-ns)
+#     │
+#     │  POST /call-tool  +  Authorization: Bearer <user-token, aud=echo-agent>
+#     ▼
+#   echo-agent (agent-ns)
+#     │
+#     │  GET /echo  (forwards user token to echo-tool)
+#     ▼
 #   ztunnel (L4 mTLS)
-#        │
-#        ▼
+#     │
+#     ▼
 #   waypoint (tool-ns)
-#        │
-#        ├─ CUSTOM AuthorizationPolicy → ext_authz (token-exchange-service)
-#        │    • Validates JWT signature, issuer, expiry via Keycloak JWKS
-#        │    • Exchanges agent token for tool-scoped token via RFC 8693
-#        │    • Replaces Authorization header with exchanged token
-#        │
-#        ├─ ALLOW AuthorizationPolicy → only agent-ns sources permitted
-#        │
-#        ▼
+#     │
+#     ├─ CUSTOM AuthorizationPolicy → ext_authz (token-exchange-service)
+#     │    • Validates JWT signature, issuer, expiry via Keycloak JWKS
+#     │    • Exchanges token for tool-scoped token via RFC 8693
+#     │    • Replaces Authorization header with exchanged token (aud=echo-tool)
+#     │
+#     ├─ ALLOW AuthorizationPolicy → only agent-ns sources permitted
+#     │
+#     ▼
 #   echo-tool (tool-ns)
-#        │
-#        └─ Returns JSON with all received headers (including Authorization)
+#     │
+#     └─ Returns JSON with all received headers (including Authorization)
 #
 # Tests:
-#   1. Invalid token → waypoint rejects the request (ext_authz denies)
-#   2. Valid token   → token is exchanged, tool receives aud=echo-tool
+#   1. Invalid token → user sends bad token to echo-agent → agent forwards →
+#      waypoint rejects (ext_authz denies)
+#   2. Valid token   → user sends valid token (aud=echo-agent) to echo-agent →
+#      agent forwards → waypoint exchanges → tool receives aud=echo-tool
 #
 set -euo pipefail
 
 KEYCLOAK_SVC="${KEYCLOAK_SVC:-keycloak-service}"
 KEYCLOAK_NS="${KEYCLOAK_NS:-keycloak}"
 REALM="waypoint-poc"
-TOOL_URL="http://echo-tool.tool-ns.svc.cluster.local:8080/echo"
+AGENT_URL="http://echo-agent.agent-ns.svc.cluster.local:8080/call-tool"
 PASS=0
 FAIL=0
 PF_PID=""
@@ -41,6 +47,7 @@ PF_PID=""
 info()  { echo -e "\033[1;34m[INFO]\033[0m  $*"; }
 ok()    { echo -e "\033[1;32m[PASS]\033[0m  $*"; PASS=$((PASS + 1)); }
 fail()  { echo -e "\033[1;31m[FAIL]\033[0m  $*"; FAIL=$((FAIL + 1)); }
+detail(){ echo -e "        $*"; }
 
 # Decode JWT payload (handles base64url padding on both Linux and macOS)
 jwt_payload() {
@@ -51,9 +58,36 @@ jwt_payload() {
   echo "$payload" | base64 -d 2>/dev/null
 }
 
-# Run a curl command inside agent-ns via a short-lived pod.
-# Writes a script to a ConfigMap to avoid JSON/shell quoting issues.
-# Usage: run_curl <pod-name> <auth-header-value> → sets CURL_HTTP_CODE and CURL_BODY
+# Print key JWT claims in a readable format
+print_token_info() {
+  local label="$1"
+  local token="$2"
+  local payload
+  payload=$(jwt_payload "$token")
+
+  local iss aud azp sub exp
+  iss=$(echo "$payload" | jq -r '.iss // "n/a"')
+  aud=$(echo "$payload" | jq -r 'if .aud | type == "array" then (.aud | join(", ")) else (.aud // "n/a") end')
+  azp=$(echo "$payload" | jq -r '.azp // "n/a"')
+  sub=$(echo "$payload" | jq -r '.sub // "n/a"')
+  exp=$(echo "$payload" | jq -r '.exp // 0')
+
+  # Convert exp to human-readable
+  local exp_human="n/a"
+  if [[ "$exp" != "0" && "$exp" != "null" ]]; then
+    exp_human=$(date -r "$exp" '+%Y-%m-%d %H:%M:%S %Z' 2>/dev/null || date -d "@$exp" '+%Y-%m-%d %H:%M:%S %Z' 2>/dev/null || echo "$exp")
+  fi
+
+  detail "$label:"
+  detail "  iss: $iss"
+  detail "  sub: $sub"
+  detail "  aud: $aud"
+  detail "  azp: $azp"
+  detail "  exp: $exp_human"
+}
+
+# Run a curl command against echo-agent inside agent-ns via a short-lived pod.
+# Usage: run_curl <pod-name> <auth-header-value> → sets CURL_BODY
 run_curl() {
   local pod_name="$1"
   local auth_value="$2"
@@ -64,19 +98,14 @@ run_curl() {
     --image=curlimages/curl:latest \
     --restart=Never \
     --command -- sh -c \
-    "HTTP_CODE=\$(curl -s -o /tmp/body -w '%{http_code}' -H 'Authorization: ${auth_value}' '${TOOL_URL}'); echo \"\${HTTP_CODE}\"; cat /tmp/body" \
+    "curl -s -H 'Authorization: ${auth_value}' '${AGENT_URL}'" \
     2>/dev/null
 
   kubectl wait --for=condition=ready "pod/$pod_name" -n agent-ns --timeout=30s 2>/dev/null || true
   sleep 5
 
-  local output
-  output=$(kubectl logs -n agent-ns "$pod_name" 2>&1) || true
+  CURL_BODY=$(kubectl logs -n agent-ns "$pod_name" 2>&1) || true
   kubectl delete pod -n agent-ns "$pod_name" --force --grace-period=0 2>/dev/null || true
-
-  # First line is the HTTP status code, rest is the body
-  CURL_HTTP_CODE=$(echo "$output" | head -1 | tr -d '[:space:]')
-  CURL_BODY=$(echo "$output" | tail -n +2)
 }
 
 cleanup() {
@@ -90,63 +119,116 @@ trap cleanup EXIT
 
 info "Waiting for pods to be ready..."
 kubectl wait --for=condition=ready pod -l app=keycloak -n "$KEYCLOAK_NS" --timeout=180s
+kubectl wait --for=condition=ready pod -l app=echo-agent -n agent-ns --timeout=60s
 kubectl wait --for=condition=ready pod -l app=echo-tool -n tool-ns --timeout=60s
 kubectl wait --for=condition=ready pod -l app=token-exchange-service -n kagenti-system --timeout=60s
 
-# ---------- Get agent token from Keycloak ----------
+# ---------- Get user token from Keycloak ----------
 
-info "Obtaining agent token from Keycloak..."
+info "Obtaining user token from Keycloak (aud=echo-agent)..."
 kubectl port-forward -n "$KEYCLOAK_NS" "svc/$KEYCLOAK_SVC" 18080:8080 &
 PF_PID=$!
 sleep 3
 
 KC_TOKEN_URL="http://localhost:18080/realms/$REALM/protocol/openid-connect/token"
-AGENT_TOKEN=$(curl -sf -X POST "$KC_TOKEN_URL" \
+USER_TOKEN=$(curl -sf -X POST "$KC_TOKEN_URL" \
   -d "grant_type=client_credentials" \
   -d "client_id=echo-agent" \
   -d "client_secret=agent-secret" | jq -r '.access_token')
 
-if [[ -z "$AGENT_TOKEN" || "$AGENT_TOKEN" == "null" ]]; then
-  fail "Could not obtain agent token from Keycloak"
+if [[ -z "$USER_TOKEN" || "$USER_TOKEN" == "null" ]]; then
+  fail "Could not obtain user token from Keycloak"
   exit 1
 fi
-info "Agent token obtained (azp: $(jwt_payload "$AGENT_TOKEN" | jq -r '.azp'))"
 
-# ---------- Test 1: Invalid token is rejected ----------
+USER_AUD=$(jwt_payload "$USER_TOKEN" | jq -r 'if .aud | type == "array" then (.aud | join(", ")) else (.aud // "n/a") end')
+USER_AZP=$(jwt_payload "$USER_TOKEN" | jq -r '.azp // "n/a"')
+USER_SUB=$(jwt_payload "$USER_TOKEN" | jq -r '.sub // "n/a"')
 
-info "Test 1: Invalid token is rejected by waypoint"
+info "User token obtained"
+print_token_info "User token (before exchange)" "$USER_TOKEN"
+
+# ==========================================================================
+# Test 1: Invalid token is rejected
+# ==========================================================================
+
+echo ""
+info "Test 1: Invalid token is rejected"
+detail "User sends invalid token to echo-agent → echo-agent forwards to echo-tool"
+detail "→ waypoint ext_authz rejects (JWT parsing/signature validation fails)"
+echo ""
 
 run_curl "curl-invalid" "Bearer invalid-token-12345"
 
-if [[ "$CURL_HTTP_CODE" == "401" || "$CURL_HTTP_CODE" == "403" ]]; then
-  ok "Invalid token rejected (HTTP $CURL_HTTP_CODE)"
+TOOL_STATUS=$(echo "$CURL_BODY" | jq -r '.tool_status // empty' 2>/dev/null)
+
+if [[ -z "$TOOL_STATUS" ]]; then
+  # echo-agent might have returned an error before reaching the tool
+  detail "Response: $CURL_BODY"
+  AGENT_ERROR=$(echo "$CURL_BODY" | jq -r '.error // empty' 2>/dev/null)
+  if [[ -n "$AGENT_ERROR" ]]; then
+    fail "echo-agent returned error before reaching waypoint: $AGENT_ERROR"
+  else
+    fail "Unexpected response from echo-agent"
+  fi
+elif [[ "$TOOL_STATUS" == "401" || "$TOOL_STATUS" == "403" ]]; then
+  TOOL_BODY=$(echo "$CURL_BODY" | jq -r '.tool_response_raw // empty' 2>/dev/null)
+  REJECT_REASON=$(echo "$TOOL_BODY" | jq -r '.error // empty' 2>/dev/null)
+  detail "echo-agent → echo-tool: HTTP $TOOL_STATUS"
+  if [[ -n "$REJECT_REASON" ]]; then
+    detail "Rejection reason: $REJECT_REASON"
+  fi
+  ok "Invalid token rejected by waypoint (HTTP $TOOL_STATUS)"
 else
-  fail "Expected 401 or 403 for invalid token, got HTTP $CURL_HTTP_CODE"
-  info "  Response: $CURL_BODY"
+  fail "Expected tool_status 401 or 403, got $TOOL_STATUS"
+  detail "Response: $CURL_BODY"
 fi
 
-# ---------- Test 2: Valid token is exchanged and accepted ----------
+# ==========================================================================
+# Test 2: Valid token is exchanged and accepted
+# ==========================================================================
 
-info "Test 2: Valid token is exchanged and accepted by tool"
+echo ""
+info "Test 2: Valid token is exchanged and accepted"
+detail "User sends token (aud=$USER_AUD, azp=$USER_AZP) to echo-agent"
+detail "→ echo-agent forwards to echo-tool → waypoint exchanges via RFC 8693"
+detail "→ echo-tool receives new token with aud=echo-tool"
+echo ""
 
-run_curl "curl-valid" "Bearer $AGENT_TOKEN"
+run_curl "curl-valid" "Bearer $USER_TOKEN"
 
-if [[ "$CURL_HTTP_CODE" != "200" ]]; then
-  fail "Expected HTTP 200, got $CURL_HTTP_CODE"
-  info "  Response: $CURL_BODY"
-  info "  Debug: kubectl logs -n kagenti-system -l app=token-exchange-service"
+TOOL_STATUS=$(echo "$CURL_BODY" | jq -r '.tool_status // empty' 2>/dev/null)
+
+if [[ "$TOOL_STATUS" != "200" ]]; then
+  fail "Expected tool_status 200, got $TOOL_STATUS"
+  detail "Response: $CURL_BODY"
+  detail "Debug: kubectl logs -n kagenti-system -l app=token-exchange-service"
 else
-  RECEIVED_AUTH=$(echo "$CURL_BODY" | jq -r '.headers.Authorization // .headers.authorization // empty')
+  # Extract the token that echo-tool received from the echoed headers
+  TOOL_RESPONSE=$(echo "$CURL_BODY" | jq -r '.tool_response_raw // empty' 2>/dev/null)
+  RECEIVED_AUTH=$(echo "$TOOL_RESPONSE" | jq -r '.headers.Authorization // .headers.authorization // empty')
+
   if [[ -z "$RECEIVED_AUTH" ]]; then
-    fail "Tool did not receive an Authorization header"
+    fail "echo-tool did not receive an Authorization header"
   else
     RECEIVED_TOKEN=$(echo "$RECEIVED_AUTH" | sed 's/Bearer //')
-    RECEIVED_AUD=$(jwt_payload "$RECEIVED_TOKEN" | jq -r '.aud // "unknown"')
 
-    if [[ "$RECEIVED_TOKEN" == "$AGENT_TOKEN" ]]; then
-      fail "Token was NOT exchanged — tool received the original agent token"
+    echo ""
+    print_token_info "Token received by echo-tool (after exchange)" "$RECEIVED_TOKEN"
+    echo ""
+
+    RECEIVED_AUD=$(jwt_payload "$RECEIVED_TOKEN" | jq -r '.aud // "unknown"')
+    RECEIVED_AZP=$(jwt_payload "$RECEIVED_TOKEN" | jq -r '.azp // "unknown"')
+    RECEIVED_SUB=$(jwt_payload "$RECEIVED_TOKEN" | jq -r '.sub // "unknown"')
+
+    if [[ "$RECEIVED_TOKEN" == "$USER_TOKEN" ]]; then
+      fail "Token was NOT exchanged — echo-tool received the original user token"
     elif echo "$RECEIVED_AUD" | grep -q "echo-tool"; then
-      ok "Token exchanged — tool received token with aud=$RECEIVED_AUD"
+      ok "Token exchanged — echo-tool received token with aud=$RECEIVED_AUD"
+      detail "Exchange summary:"
+      detail "  aud: [$USER_AUD] → $RECEIVED_AUD"
+      detail "  azp: $USER_AZP → $RECEIVED_AZP"
+      detail "  sub: $USER_SUB → $RECEIVED_SUB (preserved)"
     else
       fail "Unexpected audience: $RECEIVED_AUD (expected echo-tool)"
     fi

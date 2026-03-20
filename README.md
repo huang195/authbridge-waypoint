@@ -5,30 +5,36 @@ A proof-of-concept that replaces Kagenti's AuthBridge sidecar architecture (5 co
 ## Architecture
 
 ```
-┌─────────────────┐     ┌──────────┐     ┌───────────────────┐     ┌─────────────────┐
-│  Agent Pod      │────>│ ztunnel  │────>│ Waypoint (L7)     │────>│  Tool Pod       │
-│  (1 container)  │     │ (L4 mTLS)│     │                   │     │  (1 container)  │
-│                 │     │          │     │ AuthzPolicy CUSTOM│     │                 │
-│  HTTP + JWT     │     └──────────┘     │   → ext_authz ────┼──┐  │  Echo headers   │
-└─────────────────┘                      └───────────────────┘  │  └─────────────────┘
-                                                                │
-                                              ┌─────────────────┘
-                                              ▼
-                                    ┌──────────────────────┐
-                                    │ token-exchange-svc   │
-                                    │ (shared, kagenti-sys)│
-                                    │ Validates JWT        │
-                                    │ Exchanges token      │
-                                    │ Returns new AuthZ    │
-                                    └──────────────────────┘
-                                              │
-                                              ▼
-                                    ┌──────────────────────┐
-                                    │ Keycloak (RFC 8693)  │
-                                    │ Standard Token       │
-                                    │ Exchange V2          │
-                                    └──────────────────────┘
+                                                           tool-ns
+                                                    ┌─────────────────────────────────────────┐
+                                                    │                                         │
+User ──── token ────> Agent Pod ─── forward ───> Waypoint (L7) ──── exchanged ────> Tool Pod  │
+(out-of-band)         (agent-ns)    token        │                   token          (tool-ns)  │
+aud=echo-agent        1 container                │ ext_authz                       1 container │
+                                                 │ ┌─────────────────────────┐                │
+                                                 │ │ token-exchange-service  │                │
+                                                 │ │ • validate JWT (JWKS)   │                │
+                                                 │ │ • exchange → aud=echo-  │                │
+                                                 │ │   tool (RFC 8693)       │                │
+                                                 │ │ • replace Authorization │                │
+                                                 │ └────────────┬────────────┘                │
+                                                 │              │                             │
+                                                 │              ▼                             │
+                                                 │         Keycloak                           │
+                                                 │    Standard Token Exchange V2              │
+                                                 └────────────────────────────────────────────┘
 ```
+
+**Token flow:**
+
+1. A user obtains a token out-of-band from Keycloak with `aud=echo-agent`
+2. The user calls `echo-agent` with this token
+3. `echo-agent` forwards the token to `echo-tool`
+4. The waypoint intercepts the request and the ext_authz service:
+   - Validates the JWT (signature, issuer, expiry) via Keycloak JWKS
+   - Exchanges it for a tool-scoped token with `aud=echo-tool` via RFC 8693
+   - Replaces the `Authorization` header
+5. `echo-tool` receives the exchanged token (not the user's original)
 
 ## What This Proves
 
@@ -74,8 +80,8 @@ make help
 
 | Component | Path | Description |
 |-----------|------|-------------|
-| `echo-tool` | `cmd/echo-tool/` | HTTP server that echoes request headers (the "tool") |
-| `echo-agent` | `cmd/echo-agent/` | HTTP client that calls echo-tool with JWT (the "agent") |
+| `echo-agent` | `cmd/echo-agent/` | Receives a user token (`aud=echo-agent`), forwards it to echo-tool |
+| `echo-tool` | `cmd/echo-tool/` | Echoes request headers as JSON — used to verify the exchanged token |
 | `token-exchange-service` | `cmd/token-exchange-service/` | ext_authz gRPC service: JWT validation + RFC 8693 token exchange |
 
 ## Deploy Manifests
@@ -90,20 +96,6 @@ make help
 | `deploy/08-workloads.yaml` | echo-agent and echo-tool Deployments + Services |
 | `deploy/09-test.sh` | End-to-end validation script |
 
-## How It Works
-
-1. Agent pod sends HTTP request to `echo-tool.tool-ns.svc` with `Authorization: Bearer <agent-token>`
-2. ztunnel intercepts and routes to the waypoint proxy (L4 mTLS)
-3. Waypoint evaluates `AuthorizationPolicy` with `action: CUSTOM`
-4. Waypoint calls `token-exchange-service` via ext_authz gRPC
-5. Token exchange service:
-   - Validates the agent's JWT (signature, issuer, expiry) via Keycloak JWKS
-   - Determines target audience from the Host header
-   - Calls Keycloak RFC 8693 token exchange to get a tool-scoped token
-   - Returns the exchanged token via `OkHttpResponse.headers_to_set`
-6. Waypoint replaces the `Authorization` header and forwards to echo-tool
-7. Echo-tool receives the request with `aud: echo-tool` token (not the agent's original)
-
 ## Keycloak Configuration
 
 The setup script (`deploy/03-keycloak-setup.sh`) configures kagenti's Keycloak using the **Standard Token Exchange V2** (Keycloak 26+ built-in, no feature flags required):
@@ -111,42 +103,50 @@ The setup script (`deploy/03-keycloak-setup.sh`) configures kagenti's Keycloak u
 1. **Creates realm** `waypoint-poc` with three clients: `echo-agent`, `echo-tool`, `token-exchange-service`
 2. **Enables standard token exchange** (`standard.token.exchange.enabled`) on `token-exchange-service` and `echo-tool`
 3. **Adds audience mappers**:
-   - `echo-agent` tokens include `token-exchange-service` in the audience (so the exchange service can present them as `subject_token`)
+   - `echo-agent` tokens include `echo-agent` as the primary audience and `token-exchange-service` (required by Keycloak standard token exchange — the requesting client must be in the subject token's `aud` claim)
    - `token-exchange-service` lists `echo-tool` as a valid audience target
 
 No legacy feature flags (`--features=token-exchange,admin-fine-grained-authz`) or fine-grained admin permissions are needed.
 
 ## End-to-End Tests
 
-The tests validate the waypoint token exchange using a curl pod in `agent-ns` that calls `echo-tool` through the waypoint:
+The tests simulate a user calling `echo-agent` with a token, which then forwards the request to `echo-tool` through the waypoint:
 
 ```
-curl pod (agent-ns)                          echo-tool (tool-ns)
-     │                                            ▲
-     │  GET /echo                                 │
-     │  Authorization: Bearer <token>             │
-     ▼                                            │
-  ztunnel ──── L4 mTLS ────> waypoint ────────────┘
-                               │
-                ┌──────────────┴──────────────────┐
-                │  1. CUSTOM AuthorizationPolicy   │
-                │     → ext_authz gRPC call        │
-                │     → token-exchange-service     │
-                │       • validate JWT (JWKS)      │
-                │       • exchange token (RFC 8693)│
-                │       • replace Authorization    │
-                │                                  │
-                │  2. ALLOW AuthorizationPolicy    │
-                │     → only agent-ns permitted    │
-                └─────────────────────────────────┘
+User (curl pod, agent-ns)
+  │
+  │  POST /call-tool
+  │  Authorization: Bearer <user-token, aud=echo-agent>
+  ▼
+echo-agent (agent-ns)
+  │
+  │  GET /echo (forwards user token)
+  ▼
+ztunnel ──── L4 mTLS ────> waypoint (tool-ns)
+                              │
+               ┌──────────────┴──────────────────┐
+               │  1. CUSTOM AuthorizationPolicy   │
+               │     → ext_authz gRPC call        │
+               │     → token-exchange-service     │
+               │       • validate JWT (JWKS)      │
+               │       • exchange token (RFC 8693) │
+               │       • replace Authorization    │
+               │                                  │
+               │  2. ALLOW AuthorizationPolicy    │
+               │     → only agent-ns permitted    │
+               └──────────────┬──────────────────┘
+                              ▼
+                        echo-tool (tool-ns)
+                              │
+                              └─ Returns headers as JSON
 ```
 
 `echo-tool` returns all received headers as JSON, allowing the test to inspect the `Authorization` header and verify whether token exchange occurred.
 
 | Test | Input | Expected |
 |------|-------|----------|
-| **Invalid token rejected** | `Authorization: Bearer invalid-token-12345` | HTTP 401/403 — waypoint rejects via ext_authz |
-| **Valid token exchanged** | `Authorization: Bearer <agent-jwt>` | HTTP 200 — tool receives token with `aud=echo-tool`, not the agent's original |
+| **Invalid token rejected** | User sends invalid token to echo-agent | echo-agent forwards it; waypoint rejects (HTTP 401/403) |
+| **Valid token exchanged** | User sends valid token (`aud=echo-agent`) to echo-agent | echo-agent forwards it; waypoint exchanges it; echo-tool receives `aud=echo-tool` |
 
 ```bash
 make test
@@ -155,6 +155,7 @@ make test
 ## Known Constraints
 
 - **CUSTOM action does not support `from.source.namespaces`** — Istio validation rejects it. Use a separate ALLOW policy for namespace filtering (defense-in-depth).
+- **Standard token exchange requires requesting client in subject token audience** — Keycloak mandates that `token-exchange-service` is in the `aud` claim of the agent's token. This is configured via an audience mapper on the `echo-agent` client.
 - **Keycloak token issuer URL may differ from internal service URL** — The `iss` claim uses the external hostname (e.g., `keycloak.localtest.me`). The token-exchange-service needs a separate `ISSUER_URL` config for JWT validation while using the internal URL for API calls.
 - **Distroless images have no shell** — The test script uses a curl debug pod in agent-ns instead of `kubectl exec` into the workload pod.
 
