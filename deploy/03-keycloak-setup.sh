@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Post-import Keycloak setup for token exchange permissions.
-# Realm JSON import creates clients but cannot configure fine-grained permissions.
-# This script enables token-exchange permissions via the admin REST API.
+# Configure the kagenti Keycloak instance for the authbridge-waypoint PoC.
+# Creates the waypoint-poc realm, registers clients, and enables standard
+# token exchange on the token-exchange-service client.
 #
-# Prerequisites: Keycloak must be running with the waypoint-poc realm imported.
+# Prerequisites: kagenti cluster running with Keycloak 26+ in the keycloak namespace.
 # Usage: KEYCLOAK_URL=http://localhost:18080 ./03-keycloak-setup.sh
 set -euo pipefail
 
@@ -12,7 +12,7 @@ REALM="waypoint-poc"
 ADMIN_USER="${KC_ADMIN_USER:-admin}"
 ADMIN_PASS="${KC_ADMIN_PASS:-admin}"
 
-echo "=== Keycloak token exchange setup ==="
+echo "=== Keycloak setup for authbridge-waypoint ==="
 echo "  URL: $KC_URL"
 echo "  Realm: $REALM"
 
@@ -27,74 +27,148 @@ if [[ -z "$ADMIN_TOKEN" || "$ADMIN_TOKEN" == "null" ]]; then
 fi
 echo "  Admin token obtained"
 
+# ---------- Step 1: Create realm ----------
+
+echo ""
+echo "1. Creating realm..."
+
+HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$KC_URL/admin/realms" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"realm\": \"$REALM\",
+    \"enabled\": true,
+    \"sslRequired\": \"none\",
+    \"registrationAllowed\": false
+  }")
+
+if [[ "$HTTP_CODE" == "201" ]]; then
+  echo "   Created realm '$REALM'"
+elif [[ "$HTTP_CODE" == "409" ]]; then
+  echo "   Realm '$REALM' already exists"
+else
+  echo "   WARNING: Unexpected status $HTTP_CODE creating realm"
+fi
+
+# ---------- Step 2: Create clients ----------
+
+echo ""
+echo "2. Creating clients..."
+
+# Helper: create a client (idempotent — ignores 409)
+create_client() {
+  local client_id="$1"
+  local secret="$2"
+  local extra="${3:-}"
+
+  local payload="{
+    \"clientId\": \"$client_id\",
+    \"enabled\": true,
+    \"clientAuthenticatorType\": \"client-secret\",
+    \"secret\": \"$secret\",
+    \"protocol\": \"openid-connect\",
+    \"publicClient\": false,
+    \"serviceAccountsEnabled\": true,
+    \"standardFlowEnabled\": false,
+    \"defaultClientScopes\": [\"openid\"]
+    $extra
+  }"
+
+  local code
+  code=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+    "$KC_URL/admin/realms/$REALM/clients" \
+    -H "Authorization: Bearer $ADMIN_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "$payload")
+
+  if [[ "$code" == "201" ]]; then
+    echo "   Created client '$client_id'"
+  elif [[ "$code" == "409" ]]; then
+    echo "   Client '$client_id' already exists"
+  else
+    echo "   WARNING: Unexpected status $code creating client '$client_id'"
+  fi
+}
+
+create_client "echo-agent" "agent-secret" ', "directAccessGrantsEnabled": true'
+create_client "echo-tool" "tool-secret" ""
+create_client "token-exchange-service" "exchange-secret" \
+  ', "attributes": {"standard.token.exchange.enabled": "true"}'
+
 # Helper: get client UUID by clientId
 get_client_uuid() {
   curl -sf "$KC_URL/admin/realms/$REALM/clients?clientId=$1" \
     -H "Authorization: Bearer $ADMIN_TOKEN" | jq -r '.[0].id'
 }
 
+# ---------- Step 3: Ensure standard token exchange is enabled ----------
+
+echo ""
+echo "3. Ensuring standard token exchange is enabled on token-exchange-service..."
+
+# If the client already existed, the create_client call above won't update
+# attributes, so we patch it explicitly.
+for client_name in token-exchange-service echo-tool; do
+  CLIENT_UUID=$(get_client_uuid "$client_name")
+  curl -sf -X PUT "$KC_URL/admin/realms/$REALM/clients/$CLIENT_UUID" \
+    -H "Authorization: Bearer $ADMIN_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "$(curl -sf "$KC_URL/admin/realms/$REALM/clients/$CLIENT_UUID" \
+      -H "Authorization: Bearer $ADMIN_TOKEN" | \
+      jq '.attributes["standard.token.exchange.enabled"] = "true"')"
+  echo "   OK — enabled on $client_name"
+done
+
+# ---------- Step 4: Add audience mappers ----------
+
+echo ""
+echo "4. Adding audience mappers..."
+
+# Helper: add an audience mapper to a client (idempotent)
+add_audience_mapper() {
+  local target_client_uuid="$1"
+  local mapper_name="$2"
+  local audience_client="$3"
+
+  local code
+  code=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+    "$KC_URL/admin/realms/$REALM/clients/$target_client_uuid/protocol-mappers/models" \
+    -H "Authorization: Bearer $ADMIN_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "{
+      \"name\": \"$mapper_name\",
+      \"protocol\": \"openid-connect\",
+      \"protocolMapper\": \"oidc-audience-mapper\",
+      \"consentRequired\": false,
+      \"config\": {
+        \"included.client.audience\": \"$audience_client\",
+        \"id.token.claim\": \"false\",
+        \"access.token.claim\": \"true\"
+      }
+    }")
+
+  if [[ "$code" == "201" ]]; then
+    echo "   OK — created '$mapper_name'"
+  elif [[ "$code" == "409" ]]; then
+    echo "   '$mapper_name' already exists"
+  else
+    echo "   WARNING: Unexpected status $code creating '$mapper_name'"
+  fi
+}
+
+AGENT_UUID=$(get_client_uuid "echo-agent")
 EXCHANGE_UUID=$(get_client_uuid "token-exchange-service")
-TOOL_UUID=$(get_client_uuid "echo-tool")
-RM_UUID=$(get_client_uuid "realm-management")
 
-echo "  token-exchange-service UUID: $EXCHANGE_UUID"
-echo "  echo-tool UUID: $TOOL_UUID"
-echo "  realm-management UUID: $RM_UUID"
+# Agent tokens must include token-exchange-service in the audience so the
+# exchange service can present them as subject_token.
+add_audience_mapper "$AGENT_UUID" "token-exchange-service-audience" "token-exchange-service"
 
-# Step 1: Enable fine-grained permissions on echo-tool
-echo ""
-echo "1. Enabling fine-grained permissions on echo-tool..."
-PERM_RESULT=$(curl -s -X PUT "$KC_URL/admin/realms/$REALM/clients/$TOOL_UUID/management/permissions" \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"enabled": true}')
+# token-exchange-service must list echo-tool as a valid audience so Keycloak
+# allows exchanging tokens scoped to echo-tool.
+add_audience_mapper "$EXCHANGE_UUID" "echo-tool-audience" "echo-tool"
 
-if echo "$PERM_RESULT" | jq -e '.scopePermissions["token-exchange"]' >/dev/null 2>&1; then
-  TOKEN_EXCHANGE_PERM_ID=$(echo "$PERM_RESULT" | jq -r '.scopePermissions["token-exchange"]')
-  echo "   OK — token-exchange permission ID: $TOKEN_EXCHANGE_PERM_ID"
-else
-  echo "   ERROR: $PERM_RESULT"
-  echo "   Ensure Keycloak was started with --features=token-exchange,admin-fine-grained-authz:v1"
-  exit 1
-fi
+# ---------- Verify: test token exchange ----------
 
-# Step 2: Create a client policy for token-exchange-service
-echo ""
-echo "2. Creating client policy for token-exchange-service..."
-POLICY_RESULT=$(curl -sf -X POST "$KC_URL/admin/realms/$REALM/clients/$RM_UUID/authz/resource-server/policy/client" \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d "{
-    \"name\": \"allow-token-exchange-service\",
-    \"description\": \"Allow token-exchange-service to perform token exchange\",
-    \"clients\": [\"$EXCHANGE_UUID\"],
-    \"logic\": \"POSITIVE\"
-  }" 2>/dev/null || echo '{"id":"already-exists"}')
-
-POLICY_ID=$(echo "$POLICY_RESULT" | jq -r '.id')
-if [[ "$POLICY_ID" == "already-exists" || -z "$POLICY_ID" ]]; then
-  # Policy may already exist — look it up
-  POLICY_ID=$(curl -sf "$KC_URL/admin/realms/$REALM/clients/$RM_UUID/authz/resource-server/policy" \
-    -H "Authorization: Bearer $ADMIN_TOKEN" | jq -r '.[] | select(.name=="allow-token-exchange-service") | .id')
-fi
-echo "   Policy ID: $POLICY_ID"
-
-# Step 3: Associate the policy with the token-exchange permission
-echo ""
-echo "3. Associating policy with token-exchange permission..."
-PERM_DETAILS=$(curl -sf "$KC_URL/admin/realms/$REALM/clients/$RM_UUID/authz/resource-server/permission/scope/$TOKEN_EXCHANGE_PERM_ID" \
-  -H "Authorization: Bearer $ADMIN_TOKEN")
-
-UPDATED_PERM=$(echo "$PERM_DETAILS" | jq --arg pid "$POLICY_ID" '. + {policies: [$pid]}')
-
-curl -sf -X PUT "$KC_URL/admin/realms/$REALM/clients/$RM_UUID/authz/resource-server/permission/scope/$TOKEN_EXCHANGE_PERM_ID" \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d "$UPDATED_PERM" >/dev/null
-
-echo "   OK — permission updated"
-
-# Verify: test token exchange
 echo ""
 echo "=== Verifying token exchange ==="
 AGENT_TOKEN=$(curl -sf -X POST "$KC_URL/realms/$REALM/protocol/openid-connect/token" \
@@ -109,7 +183,8 @@ EXCHANGE_RESULT=$(curl -s -X POST "$KC_URL/realms/$REALM/protocol/openid-connect
   -d "client_secret=exchange-secret")
 
 if echo "$EXCHANGE_RESULT" | jq -e '.access_token' >/dev/null 2>&1; then
-  EXCHANGED_AUD=$(echo "$EXCHANGE_RESULT" | jq -r '.access_token' | cut -d. -f2 | base64 -d 2>/dev/null | jq -r '.aud')
+  PAYLOAD=$(echo "$EXCHANGE_RESULT" | jq -r '.access_token' | cut -d. -f2 | tr '_-' '/+' | awk '{while(length%4)$0=$0"=";print}' | base64 -d 2>/dev/null)
+  EXCHANGED_AUD=$(echo "$PAYLOAD" | jq -r '.aud')
   echo "  Token exchange successful — exchanged token aud: $EXCHANGED_AUD"
 else
   echo "  ERROR: Token exchange failed"

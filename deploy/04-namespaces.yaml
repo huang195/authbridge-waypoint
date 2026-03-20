@@ -15,11 +15,3 @@ metadata:
   labels:
     istio.io/dataplane-mode: ambient
     istio.io/use-waypoint: tool-waypoint
----
-# kagenti-system: where the shared token-exchange-service runs
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: kagenti-system
-  labels:
-    istio.io/dataplane-mode: ambient
