@@ -1,40 +1,42 @@
 ---
-# CUSTOM action: call ext_authz for JWT validation + token exchange.
-# The waypoint delegates to the token-exchange-service, which validates
-# the agent's JWT and exchanges it for a tool-scoped token.
-# Policy evaluation order: CUSTOM → DENY → ALLOW
-# Note: CUSTOM action does not support from.source.namespaces — use a
-# separate ALLOW policy for namespace restriction.
+# Outbound token exchange: when the agent calls a tool, the waypoint
+# intercepts the outbound request and calls the ext_authz service to
+# validate the agent's JWT and exchange it for a tool-scoped token.
+#
+# This policy targets the agent's ServiceAccount (workload-level waypoint),
+# so it runs on the agent's outbound path — the token exchange happens
+# on behalf of the agent, not the tool.
 apiVersion: security.istio.io/v1
 kind: AuthorizationPolicy
 metadata:
-  name: token-exchange
-  namespace: tool-ns
+  name: outbound-token-exchange
+  namespace: agent-ns
 spec:
   targetRefs:
-    - kind: Service
+    - kind: ServiceAccount
       group: ""
-      name: echo-tool
+      name: echo-agent
   action: CUSTOM
   provider:
     name: kagenti-token-exchange
   rules:
-    - {} # Match all requests to echo-tool; namespace filtering done by ALLOW policy
+    - {} # Match all outbound requests from the agent
 ---
-# ALLOW: defense-in-depth — only agents from agent-ns can reach echo-tool.
-# Even if ext_authz is misconfigured, only pods from agent-ns can reach the tool.
+# Inbound JWT validation: requests TO the agent must carry a valid JWT.
+# The same ext_authz service validates the token (but skips exchange
+# since the request is inbound, not outbound to a tool).
 apiVersion: security.istio.io/v1
 kind: AuthorizationPolicy
 metadata:
-  name: allow-agent-to-tool
-  namespace: tool-ns
+  name: inbound-jwt-validation
+  namespace: agent-ns
 spec:
   targetRefs:
     - kind: Service
       group: ""
-      name: echo-tool
-  action: ALLOW
+      name: echo-agent
+  action: CUSTOM
+  provider:
+    name: kagenti-token-exchange
   rules:
-    - from:
-        - source:
-            namespaces: ["agent-ns"]
+    - {} # Match all inbound requests to the agent

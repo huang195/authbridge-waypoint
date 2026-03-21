@@ -5,34 +5,35 @@
 #
 #   User (curl pod, agent-ns)
 #     │
-#     │  POST /call-tool  +  Authorization: Bearer <user-token, aud=echo-agent>
+#     │  POST /call-tool  +  Authorization: Bearer <user-token>
 #     ▼
 #   echo-agent (agent-ns)
 #     │
 #     │  GET /echo  (forwards user token to echo-tool)
 #     ▼
-#   ztunnel (L4 mTLS)
-#     │
-#     ▼
-#   waypoint (tool-ns)
+#   agent-waypoint (agent-ns, workload-level)
 #     │
 #     ├─ CUSTOM AuthorizationPolicy → ext_authz (token-exchange-service)
 #     │    • Validates JWT signature, issuer, expiry via Keycloak JWKS
 #     │    • Exchanges token for tool-scoped token via RFC 8693
 #     │    • Replaces Authorization header with exchanged token (aud=echo-tool)
 #     │
-#     ├─ ALLOW AuthorizationPolicy → only agent-ns sources permitted
+#     ▼
+#   ztunnel (L4 mTLS)
 #     │
 #     ▼
-#   echo-tool (tool-ns)
+#   echo-tool (tool-ns, no waypoint — just a plain pod in ambient mesh)
 #     │
 #     └─ Returns JSON with all received headers (including Authorization)
 #
+# The waypoint is on the AGENT side (attached to the agent's ServiceAccount),
+# not the tool side. Token validation and exchange happen on behalf of the agent.
+#
 # Tests:
 #   1. Invalid token → user sends bad token to echo-agent → agent forwards →
-#      waypoint rejects (ext_authz denies)
-#   2. Valid token   → user sends valid token (aud=echo-agent) to echo-agent →
-#      agent forwards → waypoint exchanges → tool receives aud=echo-tool
+#      agent waypoint rejects (ext_authz denies)
+#   2. Valid token   → user sends valid token to echo-agent → agent forwards →
+#      agent waypoint exchanges → tool receives aud=echo-tool
 #
 set -euo pipefail
 

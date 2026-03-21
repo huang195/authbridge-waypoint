@@ -43,34 +43,64 @@ The plan considered using Istio's `RequestAuthentication` for JWT validation and
 3. **No two-phase problem**: If RequestAuthentication validates the original token, and ext_authz replaces it, the waypoint would need to skip validation of the exchanged token. This creates a confusing policy chain.
 4. **Matches AuthProxy model**: The existing AuthBridge go-processor handles both inbound validation and outbound exchange in one component.
 
+## Waypoint Placement: Agent-Side (Source)
+
+The waypoint is attached to the agent's **ServiceAccount**, not to the tool namespace.
+This is a deliberate design choice that mirrors how AuthBridge works today — the security
+logic runs on behalf of the agent, and the tool namespace requires no special configuration.
+
+```
+                     agent-ns
+  ┌──────────────────────────────────────────┐
+  │                                          │
+  │  Agent Pod ──outbound──> agent-waypoint  │──mTLS──> Tool Pod (tool-ns)
+  │                          (workload-level)│          (no waypoint)
+  │                                          │
+  └──────────────────────────────────────────┘
+```
+
+**How it works:**
+- The Gateway resource has `istio.io/waypoint-for: workload` (not `service`)
+- The agent's ServiceAccount has `istio.io/use-waypoint: agent-waypoint`
+- ztunnel routes both inbound TO and outbound FROM the agent through the waypoint
+- The tool namespace only needs `istio.io/dataplane-mode: ambient` (L4 mTLS)
+
 ## Istio Policy Chain
 
+Two AuthorizationPolicies run on the agent-side waypoint:
+
 ```
-Request arrives at waypoint
-        │
-        ▼
-┌─── CUSTOM ───┐     Calls token-exchange-service via ext_authz.
-│ token-exchange│     Validates JWT, exchanges token, sets new Authorization header.
-│               │     NOTE: CUSTOM does not support from.source.namespaces —
-└───────┬───────┘     matches all requests; namespace filtering is in ALLOW.
-        │
-        ▼
-┌─── DENY ─────┐     (None configured — would go here if needed)
-└───────┬───────┘
-        │
-        ▼
-┌─── ALLOW ────┐     allow-agent-to-tool: only agent-ns sources allowed.
-│ namespace    │     Uses mTLS identity (ztunnel provides SPIFFE ID).
-│ check        │     Defense-in-depth: even if ext_authz is misconfigured,
-└───────┬───────┘     only agent-ns pods can reach the tool.
-        │
-        ▼
-  Forward to backend (echo-tool) with exchanged token
+Outbound: Agent calls tool
+─────────────────────────────
+Agent Pod → agent-waypoint
+                │
+                ▼
+  ┌─── CUSTOM (outbound-token-exchange) ───┐
+  │ targetRef: ServiceAccount/echo-agent   │
+  │ → ext_authz: validate JWT + exchange   │
+  │ → replace Authorization header         │
+  └───────────────┬────────────────────────┘
+                  │
+                  ▼
+            ztunnel (mTLS) → Tool Pod
+
+Inbound: User calls agent
+─────────────────────────────
+User → agent-waypoint
+            │
+            ▼
+  ┌─── CUSTOM (inbound-jwt-validation) ───┐
+  │ targetRef: Service/echo-agent          │
+  │ → ext_authz: validate JWT only         │
+  │   (no audience mapping → pass through) │
+  └───────────────┬───────────────────────┘
+                  │
+                  ▼
+            Agent Pod
 ```
 
-**Important**: Istio's CUSTOM action does not support `from.source.namespaces` or other
-L4 source matchers. The CUSTOM policy must use `rules: [{}]` (match all) and rely on
-the separate ALLOW policy for namespace-based access control.
+The ext_authz service distinguishes inbound vs outbound automatically: if the destination
+host has an audience mapping, it exchanges the token; if not, it validates and passes through.
 
 ## Token Exchange Flow (RFC 8693)
 

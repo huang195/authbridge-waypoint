@@ -1,12 +1,18 @@
 ---
-# Waypoint proxy for tool-ns — handles L7 policies including ext_authz
+# Waypoint proxy for agent workloads — handles both inbound JWT validation
+# and outbound token exchange. Attached to the agent's ServiceAccount so it
+# intercepts traffic both TO and FROM the agent.
+#
+# waypoint-for: workload — processes traffic for workloads (not services),
+# which enables source-side (outbound) interception when attached via
+# ServiceAccount label.
 apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway
 metadata:
-  name: tool-waypoint
-  namespace: tool-ns
+  name: agent-waypoint
+  namespace: agent-ns
   labels:
-    istio.io/waypoint-for: service
+    istio.io/waypoint-for: workload
 spec:
   gatewayClassName: istio-waypoint
   listeners:

@@ -1,4 +1,15 @@
 ---
+# ServiceAccount for echo-agent — the waypoint is attached here.
+# This makes the waypoint intercept both inbound and outbound traffic
+# for workloads using this SA.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: echo-agent
+  namespace: agent-ns
+  labels:
+    istio.io/use-waypoint: agent-waypoint
+---
 # echo-agent: the "agent" that calls the tool
 apiVersion: apps/v1
 kind: Deployment
@@ -17,6 +28,7 @@ spec:
       labels:
         app: echo-agent
     spec:
+      serviceAccountName: echo-agent
       containers:
         - name: echo-agent
           image: localhost:5000/echo-agent:latest
@@ -52,7 +64,8 @@ spec:
     - port: 8080
       targetPort: 8080
 ---
-# echo-tool: the "tool" that echoes headers
+# echo-tool: the "tool" that echoes headers.
+# No waypoint, no sidecar, no special config — just a plain pod in ambient mesh.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
