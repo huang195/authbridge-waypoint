@@ -43,64 +43,69 @@ The plan considered using Istio's `RequestAuthentication` for JWT validation and
 3. **No two-phase problem**: If RequestAuthentication validates the original token, and ext_authz replaces it, the waypoint would need to skip validation of the exchanged token. This creates a confusing policy chain.
 4. **Matches AuthProxy model**: The existing AuthBridge go-processor handles both inbound validation and outbound exchange in one component.
 
-## Waypoint Placement: Agent-Side (Source)
+## Waypoint Placement: Two Waypoints
 
-The waypoint is attached to the agent's **ServiceAccount**, not to the tool namespace.
-This is a deliberate design choice that mirrors how AuthBridge works today — the security
-logic runs on behalf of the agent, and the tool namespace requires no special configuration.
+Istio waypoints are **strictly destination-side** — they intercept traffic going TO services
+in their namespace, never outbound FROM them. This was validated during the PoC: a waypoint
+in agent-ns with `waypoint-for: workload` or `all` does not intercept outbound traffic
+from the agent to tools in other namespaces.
+
+Therefore the PoC uses **two waypoints** with a clear separation of concerns:
 
 ```
-                     agent-ns
-  ┌──────────────────────────────────────────┐
-  │                                          │
-  │  Agent Pod ──outbound──> agent-waypoint  │──mTLS──> Tool Pod (tool-ns)
-  │                          (workload-level)│          (no waypoint)
-  │                                          │
-  └──────────────────────────────────────────┘
+       agent-ns                                        tool-ns
+┌────────────────────────┐                  ┌──────────────────────────┐
+│                        │                  │                          │
+│  agent-waypoint        │                  │  tool-waypoint           │
+│  • inbound JWT         │                  │  • validate + exchange   │
+│    validation          │                  │    outbound tokens       │
+│                        │                  │                          │
+│  Agent Pod ────────────┼── ztunnel mTLS ──┼──> Tool Pod              │
+│  (1 container)         │                  │  (1 container)           │
+└────────────────────────┘                  └──────────────────────────┘
 ```
 
-**How it works:**
-- The Gateway resource has `istio.io/waypoint-for: workload` (not `service`)
-- The agent's ServiceAccount has `istio.io/use-waypoint: agent-waypoint`
-- ztunnel routes both inbound TO and outbound FROM the agent through the waypoint
-- The tool namespace only needs `istio.io/dataplane-mode: ambient` (L4 mTLS)
+| Waypoint | Namespace | waypoint-for | Responsibility |
+|----------|-----------|-------------|----------------|
+| agent-waypoint | agent-ns | all | Inbound JWT validation (reject bad tokens before they reach the agent) |
+| tool-waypoint | tool-ns | service | Outbound token exchange (exchange agent token → tool-scoped token via RFC 8693) |
+
+Both waypoints use the same shared `token-exchange-service` via ext_authz. The service
+auto-distinguishes behavior based on the destination host: if an audience mapping exists
+for the host, it exchanges; otherwise it validates and passes through.
 
 ## Istio Policy Chain
 
-Two AuthorizationPolicies run on the agent-side waypoint:
-
 ```
-Outbound: Agent calls tool
-─────────────────────────────
-Agent Pod → agent-waypoint
-                │
-                ▼
-  ┌─── CUSTOM (outbound-token-exchange) ───┐
-  │ targetRef: ServiceAccount/echo-agent   │
-  │ → ext_authz: validate JWT + exchange   │
-  │ → replace Authorization header         │
-  └───────────────┬────────────────────────┘
-                  │
-                  ▼
-            ztunnel (mTLS) → Tool Pod
-
-Inbound: User calls agent
-─────────────────────────────
+Inbound: User calls agent (agent-ns waypoint)
+───────────────────────────────────────────────
 User → agent-waypoint
             │
             ▼
   ┌─── CUSTOM (inbound-jwt-validation) ───┐
-  │ targetRef: Service/echo-agent          │
+  │ targetRef: Gateway/agent-waypoint      │
   │ → ext_authz: validate JWT only         │
   │   (no audience mapping → pass through) │
   └───────────────┬───────────────────────┘
                   │
                   ▼
             Agent Pod
-```
 
-The ext_authz service distinguishes inbound vs outbound automatically: if the destination
-host has an audience mapping, it exchanges the token; if not, it validates and passes through.
+
+Outbound: Agent calls tool (tool-ns waypoint)
+───────────────────────────────────────────────
+Agent Pod → ztunnel (mTLS) → tool-waypoint
+                                    │
+                                    ▼
+              ┌─── CUSTOM (outbound-token-exchange) ───┐
+              │ targetRef: Gateway/tool-waypoint        │
+              │ → ext_authz: validate JWT + exchange    │
+              │ → replace Authorization header          │
+              └───────────────┬────────────────────────┘
+                              │
+                              ▼
+                        Tool Pod
+```
 
 ## Token Exchange Flow (RFC 8693)
 

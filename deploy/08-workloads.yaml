@@ -65,7 +65,8 @@ spec:
       targetPort: 8080
 ---
 # echo-tool: the "tool" that echoes headers.
-# No waypoint, no sidecar, no special config — just a plain pod in ambient mesh.
+# No sidecar — just a plain pod in ambient mesh. The tool-ns waypoint
+# handles token exchange transparently.
 apiVersion: apps/v1
 kind: Deployment
 metadata:

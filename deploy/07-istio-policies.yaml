@@ -1,30 +1,7 @@
 ---
-# Outbound token exchange: when the agent calls a tool, the waypoint
-# intercepts the outbound request and calls the ext_authz service to
-# validate the agent's JWT and exchange it for a tool-scoped token.
-#
-# This policy targets the agent's ServiceAccount (workload-level waypoint),
-# so it runs on the agent's outbound path — the token exchange happens
-# on behalf of the agent, not the tool.
-apiVersion: security.istio.io/v1
-kind: AuthorizationPolicy
-metadata:
-  name: outbound-token-exchange
-  namespace: agent-ns
-spec:
-  targetRefs:
-    - kind: ServiceAccount
-      group: ""
-      name: echo-agent
-  action: CUSTOM
-  provider:
-    name: kagenti-token-exchange
-  rules:
-    - {} # Match all outbound requests from the agent
----
-# Inbound JWT validation: requests TO the agent must carry a valid JWT.
-# The same ext_authz service validates the token (but skips exchange
-# since the request is inbound, not outbound to a tool).
+# Inbound JWT validation (agent-ns waypoint):
+# Validates JWTs on requests TO the agent. No audience mapping for
+# echo-agent, so ext_authz validates and passes through without exchange.
 apiVersion: security.istio.io/v1
 kind: AuthorizationPolicy
 metadata:
@@ -32,11 +9,31 @@ metadata:
   namespace: agent-ns
 spec:
   targetRefs:
-    - kind: Service
-      group: ""
-      name: echo-agent
+    - kind: Gateway
+      group: gateway.networking.k8s.io
+      name: agent-waypoint
   action: CUSTOM
   provider:
     name: kagenti-token-exchange
   rules:
-    - {} # Match all inbound requests to the agent
+    - {}
+---
+# Outbound token exchange (tool-ns waypoint):
+# When an agent calls a tool, the tool-ns waypoint intercepts the request
+# and calls ext_authz to validate the agent's JWT and exchange it for a
+# tool-scoped token via RFC 8693.
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: outbound-token-exchange
+  namespace: tool-ns
+spec:
+  targetRefs:
+    - kind: Gateway
+      group: gateway.networking.k8s.io
+      name: tool-waypoint
+  action: CUSTOM
+  provider:
+    name: kagenti-token-exchange
+  rules:
+    - {}

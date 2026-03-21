@@ -1,18 +1,30 @@
 ---
-# Waypoint proxy for agent workloads — handles both inbound JWT validation
-# and outbound token exchange. Attached to the agent's ServiceAccount so it
-# intercepts traffic both TO and FROM the agent.
-#
-# waypoint-for: workload — processes traffic for workloads (not services),
-# which enables source-side (outbound) interception when attached via
-# ServiceAccount label.
+# Agent-side waypoint: validates inbound JWTs to the agent.
+# waypoint-for: all — handles both service and workload traffic.
 apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway
 metadata:
   name: agent-waypoint
   namespace: agent-ns
   labels:
-    istio.io/waypoint-for: workload
+    istio.io/waypoint-for: all
+spec:
+  gatewayClassName: istio-waypoint
+  listeners:
+    - name: mesh
+      port: 15008
+      protocol: HBONE
+---
+# Tool-side waypoint: exchanges agent tokens for tool-scoped tokens.
+# Intercepts requests destined for tools and calls ext_authz to perform
+# RFC 8693 token exchange before the request reaches the tool.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: tool-waypoint
+  namespace: tool-ns
+  labels:
+    istio.io/waypoint-for: service
 spec:
   gatewayClassName: istio-waypoint
   listeners:

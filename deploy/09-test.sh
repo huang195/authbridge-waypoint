@@ -1,39 +1,34 @@
 #!/usr/bin/env bash
 # End-to-end tests for the waypoint token exchange PoC.
 #
-# Test architecture:
+# Test architecture (two waypoints):
 #
 #   User (curl pod, agent-ns)
 #     │
 #     │  POST /call-tool  +  Authorization: Bearer <user-token>
 #     ▼
+#   agent-waypoint (agent-ns) ── inbound JWT validation
+#     │
+#     ▼
 #   echo-agent (agent-ns)
 #     │
 #     │  GET /echo  (forwards user token to echo-tool)
 #     ▼
-#   agent-waypoint (agent-ns, workload-level)
-#     │
-#     ├─ CUSTOM AuthorizationPolicy → ext_authz (token-exchange-service)
-#     │    • Validates JWT signature, issuer, expiry via Keycloak JWKS
-#     │    • Exchanges token for tool-scoped token via RFC 8693
-#     │    • Replaces Authorization header with exchanged token (aud=echo-tool)
-#     │
-#     ▼
 #   ztunnel (L4 mTLS)
 #     │
 #     ▼
-#   echo-tool (tool-ns, no waypoint — just a plain pod in ambient mesh)
+#   tool-waypoint (tool-ns) ── outbound token exchange
 #     │
-#     └─ Returns JSON with all received headers (including Authorization)
-#
-# The waypoint is on the AGENT side (attached to the agent's ServiceAccount),
-# not the tool side. Token validation and exchange happen on behalf of the agent.
+#     ├─ ext_authz: validate JWT + exchange via RFC 8693
+#     │  replace Authorization header (aud=echo-tool)
+#     ▼
+#   echo-tool (tool-ns)
+#     │
+#     └─ Returns JSON with all received headers
 #
 # Tests:
-#   1. Invalid token → user sends bad token to echo-agent → agent forwards →
-#      agent waypoint rejects (ext_authz denies)
-#   2. Valid token   → user sends valid token to echo-agent → agent forwards →
-#      agent waypoint exchanges → tool receives aud=echo-tool
+#   1. Invalid token → agent forwards → tool-waypoint rejects (ext_authz denies)
+#   2. Valid token   → agent forwards → tool-waypoint exchanges → tool receives aud=echo-tool
 #
 set -euo pipefail
 

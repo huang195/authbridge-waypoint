@@ -7,13 +7,14 @@ metadata:
   labels:
     istio.io/dataplane-mode: ambient
 ---
-# tool-ns: ambient mode only (no waypoint — security is on the agent side)
+# tool-ns: ambient mode + waypoint for token exchange on inbound requests
 apiVersion: v1
 kind: Namespace
 metadata:
   name: tool-ns
   labels:
     istio.io/dataplane-mode: ambient
+    istio.io/use-waypoint: tool-waypoint
 ---
 # kagenti-system: where the shared token-exchange-service runs
 apiVersion: v1
