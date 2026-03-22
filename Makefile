@@ -72,11 +72,26 @@ test: ## Run end-to-end tests
 clean: ## Remove build artifacts
 	rm -rf bin/
 
-teardown: ## Remove deployed resources (keeps the kagenti cluster and kagenti-system)
+teardown: ## Remove all PoC resources including Keycloak realm (keeps the kagenti cluster)
+	@echo "=== Removing Kubernetes resources ==="
 	-kubectl delete -f deploy/08-workloads.yaml 2>/dev/null
 	-kubectl delete -f deploy/07-istio-policies.yaml 2>/dev/null
 	-kubectl delete -f deploy/06-waypoint.yaml 2>/dev/null
 	-kubectl delete -f deploy/05-token-exchange-svc.yaml 2>/dev/null
 	-kubectl delete ns agent-ns tool-ns 2>/dev/null
+	@echo "=== Removing Keycloak realm ==="
+	@kubectl port-forward -n keycloak svc/keycloak-service 18080:8080 & PF_PID=$$!; \
+		sleep 3; \
+		ADMIN_TOKEN=$$(curl -sf -X POST "http://localhost:18080/realms/master/protocol/openid-connect/token" \
+			-d "grant_type=password&client_id=admin-cli&username=admin&password=admin" | jq -r '.access_token'); \
+		if [ -n "$$ADMIN_TOKEN" ] && [ "$$ADMIN_TOKEN" != "null" ]; then \
+			curl -sf -X DELETE "http://localhost:18080/admin/realms/waypoint-poc" \
+				-H "Authorization: Bearer $$ADMIN_TOKEN" \
+				&& echo "   Deleted realm 'waypoint-poc'" \
+				|| echo "   Realm 'waypoint-poc' already gone"; \
+		else \
+			echo "   WARNING: Could not get admin token — realm not deleted"; \
+		fi; \
+		kill $$PF_PID 2>/dev/null || true
 
 all: setup deploy test ## Full setup, deploy, and test
