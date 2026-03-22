@@ -172,9 +172,9 @@ See the [kagenti repository](https://github.com/kagenti/kagenti) for cluster set
 ## Quick Start
 
 ```bash
-make all        # setup + deploy + test
-make teardown   # cleanup (keeps the kagenti cluster)
-make help       # see all targets
+make up     # build + configure Keycloak + deploy
+make test   # run E2E tests
+make down   # remove everything (K8s resources + Keycloak realm)
 ```
 
 ## Components
