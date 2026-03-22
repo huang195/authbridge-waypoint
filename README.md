@@ -2,6 +2,17 @@
 
 A proof-of-concept that replaces Kagenti's AuthBridge sidecar architecture (5 containers, ~150-200MB, NET_ADMIN) with **zero sidecars** using Istio ambient mesh waypoints and a shared ext_authz service for RFC 8693 token exchange.
 
+## Problem Statement
+
+Kagenti's AuthBridge requires 5 containers per agent pod:
+1. Envoy sidecar (ext_proc filter)
+2. go-processor (token exchange logic)
+3. spiffe-helper (SPIFFE identity)
+4. iptables init container (traffic redirection, requires NET_ADMIN)
+5. client-registration init container
+
+This adds ~150-200MB memory overhead per pod and requires privileged containers. For multi-tenant environments with many agent pods, this doesn't scale.
+
 ## Architecture
 
 ```
@@ -50,6 +61,103 @@ Both waypoints use the same shared `token-exchange-service` (ext_authz). The ser
 | Token exchange | Per-pod sidecar | Shared waypoint ext_authz |
 | Access control | Sidecar code | Declarative AuthorizationPolicy CRs |
 
+## Why ext_authz
+
+| | ext_authz | ext_proc |
+|---|-----------|----------|
+| Protocol | Unary gRPC (request/response) | Bidirectional gRPC stream |
+| Complexity | Simple — one CheckRequest, one CheckResponse | Complex — multiple ProcessingRequest/Response per HTTP transaction |
+| Header mutation | `OkHttpResponse.headers_to_set` | `HeaderMutation` in response to `request_headers` phase |
+| Istio integration | Native via `AuthorizationPolicy CUSTOM` | Requires `EnvoyFilter` (not recommended for ambient) |
+| Shared service | Natural — stateless, one call per request | Harder — stream lifetime tied to connection |
+
+JWT validation and token exchange are both handled in ext_authz (not `RequestAuthentication`) because:
+- Single point of logic — validation and exchange are tightly coupled
+- Meaningful error messages (`{"error": "token expired"}`) vs generic 401
+- No two-phase problem — the waypoint doesn't need to skip validation of the exchanged token
+
+## Waypoint Placement
+
+Istio waypoints are **strictly destination-side** — they intercept traffic going TO services in their namespace, never outbound FROM them. This was validated during the PoC: a workload-level waypoint (`waypoint-for: workload` or `all`) in agent-ns does not see outbound calls to tools in other namespaces.
+
+| Waypoint | Namespace | waypoint-for | Responsibility |
+|----------|-----------|-------------|----------------|
+| agent-waypoint | agent-ns | all | Inbound JWT validation |
+| tool-waypoint | tool-ns | service | Token exchange (RFC 8693) |
+
+**Istio policy chain:**
+
+```
+Inbound: User → agent-waypoint → Agent Pod
+                    │
+                    └─ CUSTOM → ext_authz: validate JWT only
+                       (no audience mapping → pass through)
+
+Outbound: Agent Pod → ztunnel → tool-waypoint → Tool Pod
+                                     │
+                                     └─ CUSTOM → ext_authz: validate + exchange
+                                        (audience mapping exists → replace Authorization)
+```
+
+## External Tools via Egress Gateway
+
+For tools outside the cluster, the same ext_authz service works via the Istio **egress gateway**:
+
+```
+Agent Pod → ztunnel → egress gateway → external tool (api.github.com)
+                         │
+                         └─ ext_authz: validate + exchange
+```
+
+A `ServiceEntry` defines the external tool, and an `AuthorizationPolicy CUSTOM` on the egress gateway triggers the same `token-exchange-service`. The `AUDIENCE_MAP` just needs entries for external hosts (e.g., `api.github.com=github-tool`).
+
+One token-exchange-service handles all destinations:
+
+| Destination | Interception point |
+|---|---|
+| In-cluster tool (different namespace) | tool-ns waypoint |
+| In-cluster tool (same namespace) | namespace waypoint |
+| External tool | egress gateway |
+
+## Token Exchange Flow (RFC 8693)
+
+```
+token-exchange-service                  Keycloak
+        │                                  │
+        │  grant_type=token-exchange       │
+        │  subject_token=<agent-jwt>       │
+        │  audience=echo-tool              │
+        │  client_id=token-exchange-service│
+        │─────────────────────────────────>│
+        │                                  │
+        │  { access_token: <tool-jwt>,     │
+        │    expires_in: 300 }             │
+        │<─────────────────────────────────│
+```
+
+The exchanged token has:
+- `aud`: `echo-tool` (the target tool's client ID)
+- `azp`: `token-exchange-service` (the client that performed the exchange)
+- `sub`: same as the original agent token's subject (preserved through exchange)
+
+**Caching**: Exchanged tokens are cached keyed by `(subject_token_hash, audience)` with TTL = `expires_in - 30s`. JWKS keys are refreshed in the background every 15 minutes.
+
+## Keycloak Configuration
+
+Keycloak 26 ships with **Standard Token Exchange V2** built-in — no server-level feature flags needed. This was validated by running E2E tests with Keycloak in production mode with zero preview features.
+
+Configuration (handled by `deploy/03-keycloak-setup.sh`):
+
+1. **Enable standard token exchange** (`standard.token.exchange.enabled = "true"`) on:
+   - `token-exchange-service` — the requesting client
+   - `echo-tool` — the target audience client
+
+2. **Add audience mappers**:
+   - `echo-agent` → `token-exchange-service` (so agent tokens include the exchange service in `aud`)
+   - `token-exchange-service` → `echo-tool` (so Keycloak allows exchanging tokens scoped to `echo-tool`)
+
+**Issuer URL split**: The token `iss` claim uses Keycloak's external hostname (e.g., `http://keycloak.localtest.me:8080`), which may differ from the in-cluster service URL. The token-exchange-service uses `KEYCLOAK_URL` for API calls and `ISSUER_URL` for JWT issuer validation.
+
 ## Prerequisites
 
 A **kagenti cluster** already deployed locally, providing:
@@ -88,46 +196,12 @@ make help       # see all targets
 make test
 ```
 
-## External Tools
-
-For tools outside the cluster, the same ext_authz service works via the Istio **egress gateway**:
-
-```
-Agent Pod → ztunnel → egress gateway → external tool (api.github.com)
-                         │
-                         └─ ext_authz: validate + exchange
-```
-
-One token-exchange-service handles in-cluster waypoints and egress gateway — unified token exchange for all destinations.
-
-## Alternative Approaches
-
-This PoC validates the mesh + ext_authz approach. The [design doc](docs/design.md#alternative-approaches) compares it with two other strategies:
-
-| Approach | Trade-off |
-|----------|-----------|
-| **Mesh + ext_authz** (this PoC) | Zero agent code changes, requires mesh |
-| **SDK / library** | Zero infrastructure, requires agent integration |
-| **K8s SA token projection** | Zero runtime exchange, requires OIDC federation per cluster |
-
-## External Tools
-
-For tools outside the cluster, the same ext_authz service works via the Istio **egress gateway**:
-
-```
-Agent Pod → ztunnel → egress gateway → external tool (api.github.com)
-                         │
-                         └─ ext_authz: validate + exchange
-```
-
-One token-exchange-service handles in-cluster waypoints and egress gateway — unified token exchange for all destinations. See [docs/design.md](docs/design.md#external-tools-via-egress-gateway).
-
 ## Known Constraints
 
-- **Waypoints are destination-side only** — Istio waypoints intercept traffic going TO services, not FROM. Outbound token exchange requires a waypoint in the tool namespace.
-- **CUSTOM action does not support `from.source.namespaces`** — Namespace filtering must use a separate ALLOW policy.
-- **Keycloak token issuer URL may differ from internal service URL** — The token-exchange-service needs a separate `ISSUER_URL` for JWT validation.
-
-## Design Details
-
-See [docs/design.md](docs/design.md).
+1. **Waypoints are destination-side only** — Istio waypoints intercept traffic going TO services, not FROM. Outbound token exchange requires a waypoint in the tool namespace.
+2. **CUSTOM action does not support `from.source.namespaces`** — Namespace filtering must use a separate ALLOW policy.
+3. **One waypoint per tool namespace** — each tool namespace needs its own waypoint. Managed declaratively via namespace labels and AuthorizationPolicy CRs.
+4. **No mTLS to Keycloak** — the token-exchange-service calls Keycloak over plain HTTP. Production should use TLS.
+5. **In-memory cache** — token cache doesn't survive pod restarts. Production could use Redis.
+6. **Static host-to-audience mapping** — `AUDIENCE_MAP` env var. Production should use a ConfigMap or CRD.
+7. **Issuer URL must be configured separately** — when Keycloak's external hostname differs from the internal service name.
