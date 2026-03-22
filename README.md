@@ -90,13 +90,13 @@ Istio waypoints are **strictly destination-side** — they intercept traffic goi
 ```
 Inbound: User → agent-waypoint → Agent Pod
                     │
-                    └─ CUSTOM → ext_authz: validate JWT only
-                       (no audience mapping → pass through)
+                    └─ ext_authz: validate JWT, check aud
+                       aud includes "echo-agent" → pass through
 
 Outbound: Agent Pod → ztunnel → tool-waypoint → Tool Pod
                                      │
-                                     └─ CUSTOM → ext_authz: validate + exchange
-                                        (audience mapping exists → replace Authorization)
+                                     └─ ext_authz: validate JWT, check aud
+                                        aud missing "echo-tool" → exchange via RFC 8693
 ```
 
 ## External Tools via Egress Gateway

@@ -27,8 +27,10 @@
 #     └─ Returns JSON with all received headers
 #
 # Tests:
-#   1. Invalid token → agent forwards → tool-waypoint rejects (ext_authz denies)
-#   2. Valid token   → agent forwards → tool-waypoint exchanges → tool receives aud=echo-tool
+#   1. Invalid token → agent-waypoint rejects (ext_authz denies before reaching agent)
+#   2. Valid token   → agent-waypoint passes (aud includes echo-agent) →
+#      agent forwards → tool-waypoint exchanges (aud missing echo-tool) →
+#      tool receives aud=echo-tool
 #
 set -euo pipefail
 
