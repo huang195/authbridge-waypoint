@@ -46,8 +46,6 @@ spec:
                 secretKeyRef:
                   name: token-exchange-credentials
                   key: CLIENT_SECRET
-            - name: OUTBOUND_AUDIENCE_MAP
-              value: "echo-tool.tool-ns.svc.cluster.local=echo-tool"
             - name: LISTEN_ADDR
               value: ":9090"
           readinessProbe:

@@ -37,7 +37,7 @@ This adds ~150-200MB memory overhead per pod and requires privileged containers.
 - **agent-waypoint** (agent-ns) — validates inbound JWTs to the agent
 - **tool-waypoint** (tool-ns) — exchanges agent tokens for tool-scoped tokens via RFC 8693
 
-Both waypoints use the same shared `token-exchange-service` (ext_authz). The service auto-distinguishes inbound vs outbound: if the destination host has an audience mapping → exchange; otherwise → validate-only passthrough.
+Both waypoints use the same shared `token-exchange-service` (ext_authz). The service uses the token's `aud` claim to decide: if `aud` includes the destination service name → pass through (already authorized); if not → exchange via RFC 8693. No configuration needed.
 
 **Token flow:**
 
@@ -109,7 +109,7 @@ Agent Pod → ztunnel → egress gateway → external tool (api.github.com)
                          └─ ext_authz: validate + exchange
 ```
 
-A `ServiceEntry` defines the external tool, and an `AuthorizationPolicy CUSTOM` on the egress gateway triggers the same `token-exchange-service`. The `OUTBOUND_AUDIENCE_MAP` just needs entries for external hosts (e.g., `api.github.com=github-tool`), or leave the value empty to use the convention (service name from hostname).
+A `ServiceEntry` defines the external tool, and an `AuthorizationPolicy CUSTOM` on the egress gateway triggers the same `token-exchange-service`. The audience is derived from the hostname convention (service name = first FQDN segment).
 
 One token-exchange-service handles all destinations:
 
@@ -203,5 +203,5 @@ make test
 3. **One waypoint per tool namespace** — each tool namespace needs its own waypoint. Managed declaratively via namespace labels and AuthorizationPolicy CRs.
 4. **No mTLS to Keycloak** — the token-exchange-service calls Keycloak over plain HTTP. Production should use TLS.
 5. **In-memory cache** — token cache doesn't survive pod restarts. Production could use Redis.
-6. **Outbound audience map required** — `OUTBOUND_AUDIENCE_MAP` must list tool hosts to trigger exchange (value can be empty for convention fallback). Hosts not in the map get inbound validation only.
+6. **Convention: Keycloak client ID must match K8s service name** — the audience is derived from the hostname. If they differ, the service would need an override mechanism (not yet implemented).
 7. **Issuer URL must be configured separately** — when Keycloak's external hostname differs from the internal service name.

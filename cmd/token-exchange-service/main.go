@@ -36,21 +36,11 @@ import (
 // Config holds service configuration, loaded from environment variables.
 type Config struct {
 	// Keycloak
-	KeycloakURL   string // Internal URL for API calls, e.g. http://keycloak-service.keycloak.svc:8080
-	IssuerURL     string // External issuer URL in tokens, e.g. http://keycloak.localtest.me:8080 (defaults to KeycloakURL)
-	Realm         string // e.g. waypoint-poc
-	ClientID      string // token-exchange-service's own client ID
-	ClientSecret  string // token-exchange-service's own client secret
-
-	// Outbound: host-to-audience mapping for token exchange (optional override).
-	// Convention fallback: service name extracted from hostname (first segment of FQDN).
-	// e.g. "github-tool-prod.tool-ns.svc.cluster.local=github-tool"
-	OutboundAudMap map[string]string
-
-	// Inbound: host-to-required-audience mapping for JWT validation (optional override).
-	// Convention fallback: service name extracted from hostname (first segment of FQDN).
-	// e.g. "weather-agent-prod.agent-ns.svc.cluster.local=weather-agent"
-	InboundAudMap map[string]string
+	KeycloakURL  string // Internal URL for API calls, e.g. http://keycloak-service.keycloak.svc:8080
+	IssuerURL    string // External issuer URL in tokens, e.g. http://keycloak.localtest.me:8080 (defaults to KeycloakURL)
+	Realm        string // e.g. waypoint-poc
+	ClientID     string // token-exchange-service's own client ID
+	ClientSecret string // token-exchange-service's own client secret
 
 	// gRPC listen address
 	ListenAddr string
@@ -125,8 +115,7 @@ func main() {
 
 	log.Printf("token-exchange-service listening on %s", cfg.ListenAddr)
 	log.Printf("  keycloak: %s/realms/%s", cfg.KeycloakURL, cfg.Realm)
-	log.Printf("  outbound audience map: %v", cfg.OutboundAudMap)
-	log.Printf("  inbound audience map: %v (convention fallback for unlisted hosts)", cfg.InboundAudMap)
+	log.Printf("  mode: audience-based (aud includes destination → pass, else → exchange)")
 	if err := srv.Serve(lis); err != nil {
 		log.Fatalf("gRPC serve failed: %v", err)
 	}
@@ -145,11 +134,6 @@ func loadConfig() Config {
 		c.IssuerURL = c.KeycloakURL
 	}
 
-	// Parse optional audience override maps (host=audience pairs, comma-separated).
-	// Both default to empty — convention fallback derives audience from hostname.
-	c.OutboundAudMap = parseHostMap(os.Getenv("OUTBOUND_AUDIENCE_MAP"))
-	c.InboundAudMap = parseHostMap(os.Getenv("INBOUND_AUDIENCE_MAP"))
-
 	if c.ClientSecret == "" {
 		log.Fatal("CLIENT_SECRET environment variable is required")
 	}
@@ -162,22 +146,6 @@ func envOrDefault(key, def string) string {
 		return v
 	}
 	return def
-}
-
-// parseHostMap parses comma-separated host=value pairs into a map.
-// Returns an empty (non-nil) map if the input is empty.
-func parseHostMap(s string) map[string]string {
-	m := make(map[string]string)
-	if s == "" {
-		return m
-	}
-	for _, pair := range strings.Split(s, ",") {
-		parts := strings.SplitN(strings.TrimSpace(pair), "=", 2)
-		if len(parts) == 2 {
-			m[parts[0]] = parts[1]
-		}
-	}
-	return m
 }
 
 // serviceNameFromHost extracts the service name (first segment) from a FQDN.
@@ -228,38 +196,25 @@ func (s *authServer) Check(ctx context.Context, req *auth.CheckRequest) (*auth.C
 		host = host[:idx]
 	}
 
-	// 3. Determine whether this is an outbound (exchange) or inbound (validate) request.
+	// 3. Audience-based routing: does the token already have access to the destination?
 	//
-	// Outbound (tool-ns waypoint): agent calling a tool → exchange token.
-	//   Host is in OUTBOUND_AUDIENCE_MAP → exchange with mapped audience.
-	//   Host is in OUTBOUND_AUDIENCE_MAP with empty value → convention: audience = service name.
+	// Derive the destination audience from the hostname (convention: service name = first
+	// segment of FQDN, e.g. "echo-tool.tool-ns.svc.cluster.local" → "echo-tool").
 	//
-	// Inbound (agent-ns waypoint): user calling an agent → validate audience only.
-	//   Host is NOT in OUTBOUND_AUDIENCE_MAP → inbound validation.
-	//   INBOUND_AUDIENCE_MAP overrides the required audience; convention fallback = service name.
+	// If the token's aud INCLUDES the destination → pass through (already authorized).
+	// If the token's aud DOES NOT include it → exchange for a scoped token via RFC 8693.
+	//
+	// This naturally handles both inbound and outbound:
+	//   Inbound (user→agent): token aud includes "echo-agent" → pass through
+	//   Outbound (agent→tool): token aud missing "echo-tool" → exchange
+	audience := serviceNameFromHost(host)
 
-	audience, isOutbound := cfg.OutboundAudMap[host]
-	if !isOutbound {
-		// Inbound path: validate that the token's aud includes the destination service.
-		requiredAud, hasOverride := cfg.InboundAudMap[host]
-		if !hasOverride {
-			requiredAud = serviceNameFromHost(host)
-		}
-
-		if !claims.hasAudience(requiredAud) {
-			log.Printf("inbound audience check failed: host=%s, required=%s, token_aud=%v", host, requiredAud, claims.Audience)
-			return denied(codes.PermissionDenied, http.StatusForbidden,
-				fmt.Sprintf("token audience does not match destination: required %q", requiredAud)), nil
-		}
-
-		log.Printf("inbound audience validated: host=%s, required=%s", host, requiredAud)
+	if claims.hasAudience(audience) {
+		log.Printf("token already authorized for %s (aud includes it), passing through", audience)
 		return allowed(), nil
 	}
 
-	// Outbound path: convention fallback — if map value is empty, derive from hostname.
-	if audience == "" {
-		audience = serviceNameFromHost(host)
-	}
+	log.Printf("token missing audience %s, attempting exchange (token_aud=%v)", audience, claims.Audience)
 
 	// 4. Check cache
 	cacheKey := hashCacheKey(tokenStr, audience)
