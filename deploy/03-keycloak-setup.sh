@@ -90,7 +90,7 @@ create_client() {
   fi
 }
 
-create_client "echo-agent" "agent-secret" ', "directAccessGrantsEnabled": true'
+create_client "echo-agent" "agent-secret" ""
 create_client "echo-tool" "tool-secret" ""
 create_client "token-exchange-service" "exchange-secret" \
   ', "attributes": {"standard.token.exchange.enabled": "true"}'
