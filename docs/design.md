@@ -149,23 +149,28 @@ The 30-second buffer before expiry prevents using tokens that are about to expir
 
 ## Keycloak Configuration
 
-### Standard Token Exchange V2
+### Required Features
 
-Keycloak 26+ ships with **Standard Token Exchange V2** (`token-exchange-standard:v2`) enabled by default. No server-level feature flags are required — the legacy `--features=token-exchange,admin-fine-grained-authz:v1` approach is no longer needed.
+Keycloak 26 requires two preview features enabled via CLI args:
 
-Standard token exchange is configured per-client via two mechanisms:
+```
+--features=token-exchange,admin-fine-grained-authz:v1
+```
 
-1. **Enable standard token exchange** on clients involved in the exchange by setting the `standard.token.exchange.enabled` client attribute to `"true"`. This must be set on:
-   - The **requesting client** (`token-exchange-service`) — the client that calls the token endpoint
-   - The **target audience client** (`echo-tool`) — the client whose audience the exchanged token will be scoped to
+- **`token-exchange`**: Enables the RFC 8693 `urn:ietf:params:oauth:grant-type:token-exchange` grant type
+- **`admin-fine-grained-authz:v1`**: Enables per-client management permissions (the `/management/permissions` API), required to grant token-exchange rights to specific clients
 
-2. **Add audience mappers** to control token routing:
-   - `echo-agent` gets an audience mapper for `token-exchange-service` — so agent tokens include the exchange service in their audience (required for the exchange service to present them as `subject_token`)
-   - `token-exchange-service` gets an audience mapper for `echo-tool` — so Keycloak allows exchanging tokens scoped to `echo-tool`
+**Critical**: The `:v1` version suffix on `admin-fine-grained-authz` is mandatory. Without it, Keycloak 26 silently ignores the feature.
 
-Fine-grained admin permissions (FGAP) are **not needed** for standard token exchange.
+### Token Exchange Permission
 
-The `deploy/03-keycloak-setup.sh` script handles all of this: realm creation, client registration, attribute patching, and audience mapper setup — all via the Keycloak admin REST API.
+After realm/client creation, three admin API steps are required:
+
+1. **Enable fine-grained permissions on the target client** (echo-tool) — auto-creates a `token-exchange` scope permission
+2. **Create a client policy** matching the exchange service client
+3. **Associate the policy** with the token-exchange permission
+
+The `deploy/03-keycloak-setup.sh` script handles all of this via the Keycloak admin REST API.
 
 ### Issuer URL Split
 
@@ -175,14 +180,16 @@ The token `iss` claim uses Keycloak's externally-configured hostname (e.g., `htt
 
 ## Limitations
 
-1. **CUSTOM AuthorizationPolicy cannot filter by source namespace**: Istio validation rejects `from.source.namespaces` on CUSTOM actions. Namespace-based access control must be a separate ALLOW policy, making the policy chain two resources instead of one.
+1. **Waypoints are strictly destination-side**: Istio waypoints intercept traffic going TO services in their namespace, never outbound FROM them. This was validated during the PoC — a workload-level waypoint (`waypoint-for: workload` or `all`) in agent-ns does not see outbound calls to tools in other namespaces. This is why two waypoints are needed: agent-ns for inbound validation, tool-ns for token exchange.
 
-2. **Single waypoint per namespace**: The waypoint is scoped to `tool-ns`. Multi-namespace routing would need waypoints per namespace or a service-level waypoint attachment.
+2. **CUSTOM AuthorizationPolicy cannot filter by source namespace**: Istio validation rejects `from.source.namespaces` on CUSTOM actions. Namespace-based access control must be a separate ALLOW policy.
 
-3. **No mTLS to Keycloak**: The token-exchange-service calls Keycloak over plain HTTP within the cluster. Production should use TLS.
+3. **One waypoint per tool namespace**: Each tool namespace needs its own waypoint with the ext_authz policy. In multi-namespace environments, this is managed declaratively via namespace labels and AuthorizationPolicy CRs.
 
-4. **Cache is in-memory**: Token cache doesn't survive pod restarts. Production could use Redis or similar.
+4. **No mTLS to Keycloak**: The token-exchange-service calls Keycloak over plain HTTP within the cluster. Production should use TLS.
 
-5. **Host-to-audience mapping is static**: The `AUDIENCE_MAP` env var maps hostnames to Keycloak audiences. Production should use a ConfigMap or CRD.
+5. **Cache is in-memory**: Token cache doesn't survive pod restarts. Production could use Redis or similar.
 
-6. **Issuer URL must be configured separately**: When Keycloak's external hostname differs from the internal service name, the token-exchange-service needs both `KEYCLOAK_URL` (for API calls) and `ISSUER_URL` (for JWT validation). This is common in Kubernetes where ingress hostnames differ from service DNS.
+6. **Host-to-audience mapping is static**: The `AUDIENCE_MAP` env var maps hostnames to Keycloak audiences. Production should use a ConfigMap or CRD.
+
+7. **Issuer URL must be configured separately**: When Keycloak's external hostname differs from the internal service name, the token-exchange-service needs both `KEYCLOAK_URL` (for API calls) and `ISSUER_URL` (for JWT validation).
