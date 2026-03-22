@@ -42,9 +42,15 @@ type Config struct {
 	ClientID      string // token-exchange-service's own client ID
 	ClientSecret  string // token-exchange-service's own client secret
 
-	// Host-to-audience mapping (comma-separated host=audience pairs)
+	// Host-to-audience mapping for outbound token exchange (comma-separated host=audience pairs)
 	// e.g. "echo-tool.tool-ns.svc.cluster.local=echo-tool"
 	AudienceMap map[string]string
+
+	// Host-to-required-audience mapping for inbound validation (optional override).
+	// If empty, convention-based: service name is extracted from the hostname
+	// (first segment of FQDN) and the token's aud must include it.
+	// e.g. "weather-agent-prod.agent-ns.svc.cluster.local=weather-agent"
+	InboundAudMap map[string]string
 
 	// gRPC listen address
 	ListenAddr string
@@ -147,6 +153,17 @@ func loadConfig() Config {
 		}
 	}
 
+	// Optional: explicit inbound audience overrides (host=required-audience)
+	c.InboundAudMap = make(map[string]string)
+	if inboundStr := os.Getenv("INBOUND_AUD_MAP"); inboundStr != "" {
+		for _, pair := range strings.Split(inboundStr, ",") {
+			parts := strings.SplitN(strings.TrimSpace(pair), "=", 2)
+			if len(parts) == 2 {
+				c.InboundAudMap[parts[0]] = parts[1]
+			}
+		}
+	}
+
 	if c.ClientSecret == "" {
 		log.Fatal("CLIENT_SECRET environment variable is required")
 	}
@@ -205,8 +222,22 @@ func (s *authServer) Check(ctx context.Context, req *auth.CheckRequest) (*auth.C
 
 	audience, ok := cfg.AudienceMap[host]
 	if !ok {
-		// Allow through without exchange if no mapping exists
-		log.Printf("no audience mapping for host=%s, passing through", host)
+		// Inbound request (no exchange mapping) — validate audience claim.
+		// 1. Check explicit override in INBOUND_AUD_MAP
+		// 2. Fall back to convention: first segment of FQDN = required audience
+		requiredAud, hasOverride := cfg.InboundAudMap[host]
+		if !hasOverride {
+			// Convention: extract service name from "svc-name.namespace.svc.cluster.local"
+			requiredAud = strings.SplitN(host, ".", 2)[0]
+		}
+
+		if !claims.hasAudience(requiredAud) {
+			log.Printf("inbound audience check failed: host=%s, required=%s, token_aud=%v", host, requiredAud, claims.Audience)
+			return denied(codes.PermissionDenied, http.StatusForbidden,
+				fmt.Sprintf("token audience does not match destination: required %q", requiredAud)), nil
+		}
+
+		log.Printf("inbound audience validated: host=%s, required=%s", host, requiredAud)
 		return allowed(), nil
 	}
 
@@ -239,6 +270,16 @@ func (s *authServer) Check(ctx context.Context, req *auth.CheckRequest) (*auth.C
 type customClaims struct {
 	jwt.RegisteredClaims
 	ClientID string `json:"azp"`
+}
+
+// hasAudience checks if the token's aud claim contains the given audience.
+func (c *customClaims) hasAudience(aud string) bool {
+	for _, a := range c.Audience {
+		if a == aud {
+			return true
+		}
+	}
+	return false
 }
 
 func validateJWT(tokenStr string) (*customClaims, error) {

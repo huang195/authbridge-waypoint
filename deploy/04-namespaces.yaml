@@ -6,6 +6,7 @@ metadata:
   name: agent-ns
   labels:
     istio.io/dataplane-mode: ambient
+    istio.io/use-waypoint: agent-waypoint
 ---
 # tool-ns: ambient mode + tool-waypoint for token exchange
 apiVersion: v1

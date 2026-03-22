@@ -137,12 +137,15 @@ run_curl "curl-invalid" "Bearer $INVALID_TOKEN"
 TOOL_STATUS=$(echo "$CURL_BODY" | jq -r '.tool_status // empty' 2>/dev/null)
 
 if [[ -z "$TOOL_STATUS" ]]; then
-  detail "Response: $CURL_BODY"
-  AGENT_ERROR=$(echo "$CURL_BODY" | jq -r '.error // empty' 2>/dev/null)
-  if [[ -n "$AGENT_ERROR" ]]; then
-    fail "echo-agent returned error before reaching waypoint: $AGENT_ERROR"
+  # No tool_status means the request never reached echo-agent.
+  # This happens when the agent-waypoint rejects the token on inbound.
+  WAYPOINT_ERROR=$(echo "$CURL_BODY" | jq -r '.error // empty' 2>/dev/null)
+  if [[ -n "$WAYPOINT_ERROR" ]] && echo "$WAYPOINT_ERROR" | grep -qi "invalid token\|malformed\|unauthorized\|audience"; then
+    detail "Rejected by agent-waypoint (inbound): $WAYPOINT_ERROR"
+    ok "Invalid token rejected by agent-waypoint before reaching echo-agent"
   else
-    fail "Unexpected response from echo-agent"
+    detail "Response: $CURL_BODY"
+    fail "Unexpected response (no tool_status, no recognized error)"
   fi
 elif [[ "$TOOL_STATUS" == "401" || "$TOOL_STATUS" == "403" ]]; then
   TOOL_BODY=$(echo "$CURL_BODY" | jq -r '.tool_response_raw // empty' 2>/dev/null)
