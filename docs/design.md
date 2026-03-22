@@ -180,6 +180,127 @@ The token `iss` claim uses Keycloak's externally-configured hostname (e.g., `htt
 - `KEYCLOAK_URL` — internal service URL for JWKS fetch and token exchange API calls
 - `ISSUER_URL` — external URL for JWT issuer validation (must match the `iss` claim)
 
+## External Tools via Egress Gateway
+
+When a tool lives outside the cluster (e.g., `api.github.com`), the same ext_authz
+mechanism works via the Istio **egress gateway**. The egress gateway sits on the path
+for traffic leaving the cluster and can trigger ext_authz to exchange tokens before
+the request reaches the external service.
+
+```
+Agent Pod → ztunnel → egress gateway → external tool (api.github.com)
+                         │
+                         └─ ext_authz: validate agent JWT,
+                            exchange for tool-scoped token,
+                            replace Authorization header
+```
+
+A `ServiceEntry` defines the external tool, and an `AuthorizationPolicy CUSTOM` on the
+egress gateway triggers the same `token-exchange-service`. The `AUDIENCE_MAP` just needs
+entries for external hosts (e.g., `api.github.com=github-tool`).
+
+This gives a unified model — one token-exchange-service handles all destinations:
+
+| Destination | Interception point | ext_authz |
+|---|---|---|
+| In-cluster tool (different namespace) | tool-ns waypoint | Same service |
+| In-cluster tool (same namespace) | namespace waypoint | Same service |
+| External tool | egress gateway | Same service |
+
+## Alternative Approaches
+
+The mesh + ext_authz approach (this PoC) is one of three distinct strategies for
+agent-to-tool token exchange. Each optimizes for a different constraint.
+
+### Approach 1: Mesh + ext_authz (this PoC)
+
+Waypoints (Istio ambient) or Cilium L7 policy intercept traffic and call a shared
+ext_authz service for token exchange. Works with any mesh that supports Envoy ext_authz.
+
+- **Agent code changes**: None
+- **Infrastructure**: Mesh + ext_authz service + per-namespace policies
+- **Onboarding a new tool**: Add namespace label + audience mapping
+- **Failure blast radius**: ext_authz down → all agents blocked
+- **Debugging**: Waypoint logs + ext_authz logs + Keycloak logs (3 systems)
+- **External tools**: Yes, via egress gateway
+
+**Best when**: A service mesh is already present. Agents get transparent token exchange
+with zero code changes — the mesh handles it as infrastructure.
+
+### Approach 2: SDK / library
+
+Embed token exchange in the agent framework SDK. The agent calls a library function
+before making tool requests. No infrastructure required.
+
+- **Agent code changes**: Import library + call before tool requests
+- **Infrastructure**: None
+- **Onboarding a new tool**: Nothing (SDK handles it via config)
+- **Failure blast radius**: Library bug → that agent only
+- **Debugging**: Application logs (1 system)
+- **External tools**: Yes, natively
+
+**Best when**: No assumptions about the target environment. Works on any platform
+(Kubernetes, VMs, local dev). Most portable option.
+
+### Approach 3: K8s SA token projection + OIDC federation
+
+Project a Kubernetes ServiceAccount token with `audience: echo-tool`. Keycloak trusts
+the K8s API server as an OIDC issuer. No runtime token exchange at all — Kubernetes
+issues the right token at pod scheduling time.
+
+- **Agent code changes**: Mount projected volume, read token from file
+- **Infrastructure**: Keycloak OIDC federation per cluster
+- **Onboarding a new tool**: Add audience to SA token projection + Keycloak trust
+- **Failure blast radius**: Misconfigured projection → that pod only
+- **Debugging**: `kubectl describe pod` (1 system)
+- **External tools**: Yes, if external tool trusts K8s-issued tokens
+
+**Best when**: Token exchange can be eliminated entirely. Simplest security model,
+but requires Keycloak OIDC federation setup per cluster and couples token issuance
+to pod scheduling.
+
+### Recommendation
+
+No single approach is a clear winner — each fits a different deployment model:
+
+| Priority | Best fit |
+|----------|----------|
+| Zero agent code changes, mesh already present | Mesh + ext_authz |
+| Zero infrastructure, works anywhere | SDK / library |
+| Zero runtime token exchange, simplest model | SA token projection |
+
+For Kagenti, **SDK/library** is the strongest default (works everywhere, no infra
+dependencies), and **mesh + ext_authz** is the best upgrade path when a mesh is present —
+the SDK can detect the mesh and skip the exchange, letting the waypoint handle it
+transparently.
+
+## External Tools via Egress Gateway
+
+When a tool lives outside the cluster (e.g., `api.github.com`), the same ext_authz
+mechanism works via the Istio **egress gateway**. The egress gateway sits on the path
+for traffic leaving the cluster and can trigger ext_authz to exchange tokens before
+the request reaches the external service.
+
+```
+Agent Pod → ztunnel → egress gateway → external tool (api.github.com)
+                         │
+                         └─ ext_authz: validate agent JWT,
+                            exchange for tool-scoped token,
+                            replace Authorization header
+```
+
+A `ServiceEntry` defines the external tool, and an `AuthorizationPolicy CUSTOM` on the
+egress gateway triggers the same `token-exchange-service`. The `AUDIENCE_MAP` just needs
+entries for external hosts (e.g., `api.github.com=github-tool`).
+
+This gives a unified model — one token-exchange-service handles all destinations:
+
+| Destination | Interception point | ext_authz |
+|---|---|---|
+| In-cluster tool (different namespace) | tool-ns waypoint | Same service |
+| In-cluster tool (same namespace) | namespace waypoint | Same service |
+| External tool | egress gateway | Same service |
+
 ## Limitations
 
 1. **Waypoints are strictly destination-side**: Istio waypoints intercept traffic going TO services in their namespace, never outbound FROM them. This was validated during the PoC — a workload-level waypoint (`waypoint-for: workload` or `all`) in agent-ns does not see outbound calls to tools in other namespaces. This is why two waypoints are needed: agent-ns for inbound validation, tool-ns for token exchange.

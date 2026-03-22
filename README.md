@@ -88,6 +88,40 @@ make help       # see all targets
 make test
 ```
 
+## External Tools
+
+For tools outside the cluster, the same ext_authz service works via the Istio **egress gateway**:
+
+```
+Agent Pod → ztunnel → egress gateway → external tool (api.github.com)
+                         │
+                         └─ ext_authz: validate + exchange
+```
+
+One token-exchange-service handles in-cluster waypoints and egress gateway — unified token exchange for all destinations.
+
+## Alternative Approaches
+
+This PoC validates the mesh + ext_authz approach. The [design doc](docs/design.md#alternative-approaches) compares it with two other strategies:
+
+| Approach | Trade-off |
+|----------|-----------|
+| **Mesh + ext_authz** (this PoC) | Zero agent code changes, requires mesh |
+| **SDK / library** | Zero infrastructure, requires agent integration |
+| **K8s SA token projection** | Zero runtime exchange, requires OIDC federation per cluster |
+
+## External Tools
+
+For tools outside the cluster, the same ext_authz service works via the Istio **egress gateway**:
+
+```
+Agent Pod → ztunnel → egress gateway → external tool (api.github.com)
+                         │
+                         └─ ext_authz: validate + exchange
+```
+
+One token-exchange-service handles in-cluster waypoints and egress gateway — unified token exchange for all destinations. See [docs/design.md](docs/design.md#external-tools-via-egress-gateway).
+
 ## Known Constraints
 
 - **Waypoints are destination-side only** — Istio waypoints intercept traffic going TO services, not FROM. Outbound token exchange requires a waypoint in the tool namespace.
