@@ -117,20 +117,58 @@ One token-exchange-service handles all in-cluster destinations:
 | In-cluster tool (same namespace) | namespace waypoint |
 | External tool | egress gateway |
 
-## Token Exchange Flow (RFC 8693)
+## Keycloak: Setup and Runtime
+
+Keycloak 26 ships with **Standard Token Exchange V2** built-in — no server-level feature flags needed. This was validated by running E2E tests with Keycloak in production mode with zero preview features.
+
+### How Keycloak is used at runtime
+
+The token-exchange-service calls Keycloak twice during its lifecycle:
+
+**1. JWKS fetch** (background, every 15 minutes):
+```
+GET /realms/waypoint-poc/protocol/openid-connect/certs
+→ Returns the realm's RSA public keys for JWT signature verification
+```
+The service caches these keys and uses them to validate every incoming JWT without calling Keycloak per-request.
+
+**2. Token exchange** (per-request, when `aud` is missing the destination):
+```
+POST /realms/waypoint-poc/protocol/openid-connect/token
+
+  grant_type         = urn:ietf:params:oauth:grant-type:token-exchange
+  subject_token      = <the agent's JWT>
+  subject_token_type = urn:ietf:params:oauth:token-type:access_token
+  audience           = echo-tool          ← derived from destination hostname
+  client_id          = token-exchange-service
+  client_secret      = exchange-secret
+
+→ Returns: { access_token: <tool-scoped JWT>, expires_in: 300 }
+```
+
+Exchanged tokens are cached keyed by `(subject_token_hash, audience)` with TTL = `expires_in - 30s`, so repeated calls to the same tool skip Keycloak entirely.
+
+### What Keycloak checks during exchange
+
+When the token exchange request arrives, Keycloak validates four things:
 
 ```
-token-exchange-service                  Keycloak
-        │                                  │
-        │  grant_type=token-exchange       │
-        │  subject_token=<agent-jwt>       │
-        │  audience=echo-tool              │
-        │  client_id=token-exchange-service│
-        │─────────────────────────────────>│
-        │                                  │
-        │  { access_token: <tool-jwt>,     │
-        │    expires_in: 300 }             │
-        │<─────────────────────────────────│
+1. Is token-exchange-service allowed to call the exchange endpoint?
+   → Check: standard.token.exchange.enabled = "true" on token-exchange-service
+   → Without this: "Client not allowed to exchange"
+
+2. Is the subject_token valid?
+   → Check: signature, issuer, expiry (same as any JWT validation)
+
+3. Is token-exchange-service in the subject_token's audience?
+   → Check: subject_token.aud includes "token-exchange-service"
+   → Without this: "Client not allowed to exchange: not in subject token audience"
+   → This is why echo-agent needs the token-exchange-service audience mapper
+
+4. Is echo-tool a valid exchange target?
+   → Check: standard.token.exchange.enabled = "true" on echo-tool
+   → Check: token-exchange-service has an audience mapper for echo-tool
+   → Without this: exchange fails or exchanged token missing correct audience
 ```
 
 The exchanged token has:
@@ -138,35 +176,89 @@ The exchanged token has:
 - `azp`: `token-exchange-service` (the client that performed the exchange)
 - `sub`: same as the original agent token's subject (preserved through exchange)
 
-**Caching**: Exchanged tokens are cached keyed by `(subject_token_hash, audience)` with TTL = `expires_in - 30s`. JWKS keys are refreshed in the background every 15 minutes.
+### Setup (deploy/03-keycloak-setup.sh)
 
-## Keycloak Configuration
+The setup script configures Keycloak via the admin REST API. Here's what it creates and why:
 
-Keycloak 26 ships with **Standard Token Exchange V2** built-in — no server-level feature flags needed. This was validated by running E2E tests with Keycloak in production mode with zero preview features.
+**Step 1 — Realm**: Creates `waypoint-poc` realm.
 
-Configuration (handled by `deploy/03-keycloak-setup.sh`):
+**Step 2 — Three clients:**
 
-**Three clients:**
+| Client | Role | Secret |
+|--------|------|--------|
+| `echo-agent` | The agent. Users obtain tokens from this client via `client_credentials` grant. | `agent-secret` |
+| `echo-tool` | The tool. Represents the target audience for exchanged tokens. Never called directly by users. | `tool-secret` |
+| `token-exchange-service` | The shared ext_authz service. Authenticates to Keycloak to perform exchanges on behalf of agents. | `exchange-secret` |
 
-| Client | Role |
-|--------|------|
-| `echo-agent` | The agent. Users obtain tokens from this client. |
-| `echo-tool` | The tool. Target audience for exchanged tokens. |
-| `token-exchange-service` | The shared service that performs exchanges. |
+**Step 3 — Enable standard token exchange** (`standard.token.exchange.enabled = "true"`):
 
-**Standard token exchange enabled** (`standard.token.exchange.enabled = "true"`) on:
-- `token-exchange-service` — allows it to call the token exchange endpoint
-- `echo-tool` — allows it to be targeted as the audience
+Set on both `token-exchange-service` and `echo-tool`. This is a per-client attribute in Keycloak 26 that opts the client into the Standard Token Exchange V2 protocol. Without it, the exchange endpoint returns `"Client not allowed to exchange"`.
 
-**Audience mappers** (control what goes into the `aud` claim):
+| Client | Why it needs the attribute |
+|--------|--------------------------|
+| `token-exchange-service` | It **calls** the exchange endpoint (it's the requesting client) |
+| `echo-tool` | It's **targeted** as the audience (Keycloak must allow tokens to be scoped to it) |
 
-| Mapper on client | Adds to `aud` | Why |
-|-----------------|---------------|-----|
-| `echo-agent` | `echo-agent` | Agent tokens include the agent's own audience — ext_authz sees this on inbound and passes through |
-| `echo-agent` | `token-exchange-service` | Required by Keycloak Standard Token Exchange V2 — the subject token must include the requesting client in its audience |
-| `token-exchange-service` | `echo-tool` | Allows exchanged tokens to be scoped to echo-tool |
+`echo-agent` does NOT need this attribute — it never participates in the exchange call.
 
-**Issuer URL split**: The token `iss` claim uses Keycloak's external hostname (e.g., `http://keycloak.localtest.me:8080`), which may differ from the in-cluster service URL. The token-exchange-service uses `KEYCLOAK_URL` for API calls and `ISSUER_URL` for JWT issuer validation.
+**Step 4 — Audience mappers** (control what goes into the `aud` claim of issued tokens):
+
+| # | Mapper on client | Adds to `aud` | Why |
+|---|-----------------|---------------|-----|
+| 1 | `echo-agent` | `echo-agent` | Agent tokens include the agent's own name. This is how the ext_authz knows to pass through on inbound: `aud` includes the destination (`echo-agent`). |
+| 2 | `echo-agent` | `token-exchange-service` | **Required by Keycloak.** When `token-exchange-service` presents the agent's token as `subject_token`, Keycloak checks that the requesting client (`token-exchange-service`) is in the subject token's `aud`. Without this mapper, the exchange fails. |
+| 3 | `token-exchange-service` | `echo-tool` | When Keycloak issues the exchanged token, this mapper ensures `echo-tool` appears in the `aud` claim. This is how the tool knows the token is meant for it. |
+
+**Step 5 — Verify**: The script obtains an agent token and performs a test exchange to confirm everything is wired correctly.
+
+### Token lifecycle end-to-end
+
+```
+1. User authenticates:
+   POST /token  client_id=echo-agent  client_secret=agent-secret
+   grant_type=client_credentials
+
+   → Keycloak returns:
+     { aud: [echo-agent, token-exchange-service, account], azp: echo-agent, sub: <user-id> }
+              ↑ mapper 1   ↑ mapper 2
+
+2. User calls echo-agent with this token.
+
+3. agent-waypoint intercepts (inbound):
+   ext_authz: aud includes "echo-agent"? → YES → pass through
+
+4. echo-agent forwards request to echo-tool.
+
+5. tool-waypoint intercepts (outbound):
+   ext_authz: aud includes "echo-tool"? → NO → exchange
+
+6. ext_authz calls Keycloak:
+   POST /token  grant_type=token-exchange
+     subject_token = <agent token from step 1>
+     audience = echo-tool
+     client_id = token-exchange-service
+     client_secret = exchange-secret
+
+   Keycloak checks:
+     ✓ token-exchange-service has standard.token.exchange.enabled
+     ✓ subject_token is valid (signature, issuer, expiry)
+     ✓ subject_token.aud includes token-exchange-service (mapper 2)
+     ✓ echo-tool has standard.token.exchange.enabled
+
+   → Keycloak returns:
+     { aud: echo-tool, azp: token-exchange-service, sub: <same user-id> }
+              ↑ mapper 3
+
+7. ext_authz replaces Authorization header with the exchanged token.
+
+8. echo-tool receives the request with aud=echo-tool.
+```
+
+### Issuer URL split
+
+The token `iss` claim uses Keycloak's external hostname (e.g., `http://keycloak.localtest.me:8080`), which may differ from the in-cluster service URL (e.g., `http://keycloak-service.keycloak.svc:8080`). The token-exchange-service uses:
+- `KEYCLOAK_URL` — internal service URL for JWKS fetch and token exchange API calls
+- `ISSUER_URL` — external URL for JWT issuer validation (must match the `iss` claim in tokens)
 
 ## Prerequisites
 
