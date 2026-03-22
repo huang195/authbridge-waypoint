@@ -109,7 +109,7 @@ Agent Pod → ztunnel → egress gateway → external tool (api.github.com)
                          └─ ext_authz: validate + exchange
 ```
 
-A `ServiceEntry` defines the external tool, and an `AuthorizationPolicy CUSTOM` on the egress gateway triggers the same `token-exchange-service`. The `AUDIENCE_MAP` just needs entries for external hosts (e.g., `api.github.com=github-tool`).
+A `ServiceEntry` defines the external tool, and an `AuthorizationPolicy CUSTOM` on the egress gateway triggers the same `token-exchange-service`. The `OUTBOUND_AUDIENCE_MAP` just needs entries for external hosts (e.g., `api.github.com=github-tool`), or leave the value empty to use the convention (service name from hostname).
 
 One token-exchange-service handles all destinations:
 
@@ -203,5 +203,5 @@ make test
 3. **One waypoint per tool namespace** — each tool namespace needs its own waypoint. Managed declaratively via namespace labels and AuthorizationPolicy CRs.
 4. **No mTLS to Keycloak** — the token-exchange-service calls Keycloak over plain HTTP. Production should use TLS.
 5. **In-memory cache** — token cache doesn't survive pod restarts. Production could use Redis.
-6. **Static host-to-audience mapping** — `AUDIENCE_MAP` env var. Production should use a ConfigMap or CRD.
+6. **Outbound audience map required** — `OUTBOUND_AUDIENCE_MAP` must list tool hosts to trigger exchange (value can be empty for convention fallback). Hosts not in the map get inbound validation only.
 7. **Issuer URL must be configured separately** — when Keycloak's external hostname differs from the internal service name.
