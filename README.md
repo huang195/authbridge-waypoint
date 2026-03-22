@@ -22,33 +22,31 @@ This adds ~150-200MB memory overhead per pod and requires privileged containers.
 │  Agent Pod              │                       │  tool-waypoint (L7)          │
 │  (1 container)          │──── ztunnel (mTLS) ──>│  │                           │
 │                         │                       │  ├─ ext_authz                │
-│  agent-waypoint (L7)    │                       │  │  • validate JWT (JWKS)    │
-│  │                      │                       │  │  • exchange token (8693)  │
-│  ├─ ext_authz           │                       │  │  • replace Authorization  │
-│  │  • validate inbound  │                       │  ▼                           │
-│  │    JWT               │                       │  Tool Pod (1 container)      │
+│  agent-waypoint (L7)    │                       │  │  aud missing "echo-tool"  │
+│  │                      │                       │  │  → exchange via RFC 8693  │
+│  ├─ ext_authz           │                       │  │  → replace Authorization  │
+│  │  aud has "echo-agent"│                       │  ▼                           │
+│  │  → pass through      │                       │  Tool Pod (1 container)      │
 │  ▼                      │                       │                              │
-│  (reject or pass)       │                       └──────────────────────────────┘
-└─────────────────────────┘
+└─────────────────────────┘                       └──────────────────────────────┘
 ```
 
-**Two waypoints, clear separation of concerns:**
+**Two waypoints, one shared ext_authz service, zero configuration:**
 
-- **agent-waypoint** (agent-ns) — validates inbound JWTs to the agent
-- **tool-waypoint** (tool-ns) — exchanges agent tokens for tool-scoped tokens via RFC 8693
+- **agent-waypoint** (agent-ns) — token `aud` includes destination → pass through
+- **tool-waypoint** (tool-ns) — token `aud` missing destination → exchange via RFC 8693
 
-Both waypoints use the same shared `token-exchange-service` (ext_authz). The service uses the token's `aud` claim to decide: if `aud` includes the destination service name → pass through (already authorized); if not → exchange via RFC 8693. No configuration needed.
+The service derives the destination audience from the hostname (convention: K8s service name = first segment of FQDN). No audience maps or direction config needed — the token's `aud` claim is the signal.
 
 **Token flow:**
 
-1. User calls `echo-agent` with a JWT
-2. agent-waypoint validates the JWT (inbound)
+1. User calls `echo-agent` with a JWT (`aud` includes `echo-agent`)
+2. agent-waypoint: ext_authz validates JWT, `aud` includes `echo-agent` → pass through
 3. `echo-agent` forwards the request to `echo-tool`
-4. tool-waypoint intercepts and calls ext_authz:
-   - Validates the JWT (signature, issuer, expiry)
-   - Exchanges it for a tool-scoped token with `aud=echo-tool`
-   - Replaces the `Authorization` header
-5. `echo-tool` receives the exchanged token
+4. tool-waypoint: ext_authz validates JWT, `aud` missing `echo-tool` → exchange
+   - Calls Keycloak RFC 8693 token exchange
+   - Replaces `Authorization` header with tool-scoped token
+5. `echo-tool` receives the exchanged token (`aud=echo-tool`, `sub` preserved)
 
 ## What This Proves
 
@@ -82,8 +80,8 @@ Istio waypoints are **strictly destination-side** — they intercept traffic goi
 
 | Waypoint | Namespace | waypoint-for | Responsibility |
 |----------|-----------|-------------|----------------|
-| agent-waypoint | agent-ns | all | Inbound JWT validation |
-| tool-waypoint | tool-ns | service | Token exchange (RFC 8693) |
+| agent-waypoint | agent-ns | all | `aud` includes destination → pass through |
+| tool-waypoint | tool-ns | service | `aud` missing destination → exchange |
 
 **Istio policy chain:**
 
@@ -109,9 +107,9 @@ Agent Pod → ztunnel → egress gateway → external tool (api.github.com)
                          └─ ext_authz: validate + exchange
 ```
 
-A `ServiceEntry` defines the external tool, and an `AuthorizationPolicy CUSTOM` on the egress gateway triggers the same `token-exchange-service`. The audience is derived from the hostname convention (service name = first FQDN segment).
+A `ServiceEntry` defines the external tool, and an `AuthorizationPolicy CUSTOM` on the egress gateway triggers the same `token-exchange-service`. For external hostnames where the convention (first FQDN segment) doesn't map to a Keycloak client ID, an override mechanism would be needed.
 
-One token-exchange-service handles all destinations:
+One token-exchange-service handles all in-cluster destinations:
 
 | Destination | Interception point |
 |---|---|
@@ -148,13 +146,25 @@ Keycloak 26 ships with **Standard Token Exchange V2** built-in — no server-lev
 
 Configuration (handled by `deploy/03-keycloak-setup.sh`):
 
-1. **Enable standard token exchange** (`standard.token.exchange.enabled = "true"`) on:
-   - `token-exchange-service` — the requesting client
-   - `echo-tool` — the target audience client
+**Three clients:**
 
-2. **Add audience mappers**:
-   - `echo-agent` → `token-exchange-service` (so agent tokens include the exchange service in `aud`)
-   - `token-exchange-service` → `echo-tool` (so Keycloak allows exchanging tokens scoped to `echo-tool`)
+| Client | Role |
+|--------|------|
+| `echo-agent` | The agent. Users obtain tokens from this client. |
+| `echo-tool` | The tool. Target audience for exchanged tokens. |
+| `token-exchange-service` | The shared service that performs exchanges. |
+
+**Standard token exchange enabled** (`standard.token.exchange.enabled = "true"`) on:
+- `token-exchange-service` — allows it to call the token exchange endpoint
+- `echo-tool` — allows it to be targeted as the audience
+
+**Audience mappers** (control what goes into the `aud` claim):
+
+| Mapper on client | Adds to `aud` | Why |
+|-----------------|---------------|-----|
+| `echo-agent` | `echo-agent` | Agent tokens include the agent's own audience — ext_authz sees this on inbound and passes through |
+| `echo-agent` | `token-exchange-service` | Required by Keycloak Standard Token Exchange V2 — the subject token must include the requesting client in its audience |
+| `token-exchange-service` | `echo-tool` | Allows exchanged tokens to be scoped to echo-tool |
 
 **Issuer URL split**: The token `iss` claim uses Keycloak's external hostname (e.g., `http://keycloak.localtest.me:8080`), which may differ from the in-cluster service URL. The token-exchange-service uses `KEYCLOAK_URL` for API calls and `ISSUER_URL` for JWT issuer validation.
 
@@ -189,8 +199,8 @@ make down   # remove everything (K8s resources + Keycloak realm)
 
 | Test | Input | Expected |
 |------|-------|----------|
-| **Invalid token rejected** | Invalid token → echo-agent → tool-waypoint | ext_authz rejects (HTTP 401) |
-| **Valid token exchanged** | Valid token → echo-agent → tool-waypoint | Token exchanged; echo-tool receives `aud=echo-tool`, `sub` preserved |
+| **Invalid token rejected** | Invalid token → agent-waypoint | ext_authz rejects (HTTP 401) before reaching agent |
+| **Valid token exchanged** | Valid token → agent-waypoint → echo-agent → tool-waypoint | Token exchanged; echo-tool receives `aud=echo-tool`, `sub` preserved |
 
 ```bash
 make test
@@ -203,5 +213,6 @@ make test
 3. **One waypoint per tool namespace** — each tool namespace needs its own waypoint. Managed declaratively via namespace labels and AuthorizationPolicy CRs.
 4. **No mTLS to Keycloak** — the token-exchange-service calls Keycloak over plain HTTP. Production should use TLS.
 5. **In-memory cache** — token cache doesn't survive pod restarts. Production could use Redis.
-6. **Convention: Keycloak client ID must match K8s service name** — the audience is derived from the hostname. If they differ, the service would need an override mechanism (not yet implemented).
-7. **Issuer URL must be configured separately** — when Keycloak's external hostname differs from the internal service name.
+6. **Convention: Keycloak client ID must match K8s service name** — the audience is derived from the hostname. If they differ, an override mechanism would be needed (not yet implemented).
+7. **Convention doesn't work for external hostnames** — `api.github.com` → first segment is `api`, not a Keycloak client ID. External tools would need an explicit mapping.
+8. **Issuer URL must be configured separately** — when Keycloak's external hostname differs from the internal service name.
