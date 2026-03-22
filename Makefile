@@ -39,6 +39,11 @@ setup: ## Configure Keycloak realm, deploy namespaces and waypoint
 		echo "ERROR: kagenti cluster '$(CLUSTER_NAME)' not found. Please deploy it first."; \
 		exit 1; \
 	fi
+	@if ! kubectl get cm istio -n istio-system -o jsonpath='{.data.mesh}' 2>/dev/null | grep -q kagenti-token-exchange; then \
+		echo "ERROR: Istio mesh config missing 'kagenti-token-exchange' ext_authz provider."; \
+		echo "       Add it to the meshConfig.extensionProviders in the istio ConfigMap."; \
+		exit 1; \
+	fi
 	@echo "=== Configuring Keycloak realm and clients ==="
 	@echo "  (port-forward to kagenti Keycloak for setup)"
 	kubectl port-forward -n keycloak svc/keycloak-service 18080:8080 & PF_PID=$$!; \
@@ -67,11 +72,11 @@ test: ## Run end-to-end tests
 clean: ## Remove build artifacts
 	rm -rf bin/
 
-teardown: ## Remove deployed resources (keeps the kagenti cluster)
+teardown: ## Remove deployed resources (keeps the kagenti cluster and kagenti-system)
 	-kubectl delete -f deploy/08-workloads.yaml 2>/dev/null
 	-kubectl delete -f deploy/07-istio-policies.yaml 2>/dev/null
 	-kubectl delete -f deploy/06-waypoint.yaml 2>/dev/null
 	-kubectl delete -f deploy/05-token-exchange-svc.yaml 2>/dev/null
-	-kubectl delete -f deploy/04-namespaces.yaml 2>/dev/null
+	-kubectl delete ns agent-ns tool-ns 2>/dev/null
 
 all: setup deploy test ## Full setup, deploy, and test

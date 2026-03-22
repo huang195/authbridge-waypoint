@@ -1,5 +1,5 @@
 ---
-# agent-ns: ambient mode enabled
+# agent-ns: ambient mode + agent-waypoint for inbound JWT validation
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -7,7 +7,7 @@ metadata:
   labels:
     istio.io/dataplane-mode: ambient
 ---
-# tool-ns: ambient mode + waypoint for token exchange on inbound requests
+# tool-ns: ambient mode + tool-waypoint for token exchange
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -15,11 +15,3 @@ metadata:
   labels:
     istio.io/dataplane-mode: ambient
     istio.io/use-waypoint: tool-waypoint
----
-# kagenti-system: where the shared token-exchange-service runs
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: kagenti-system
-  labels:
-    istio.io/dataplane-mode: ambient

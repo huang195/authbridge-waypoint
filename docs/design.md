@@ -135,8 +135,8 @@ token-exchange-service                  Keycloak
 
 The exchanged token has:
 - `aud`: `echo-tool` (the target tool's client ID)
-- `azp`: may differ based on Keycloak configuration
-- `sub`: same as the original agent token's subject
+- `azp`: `token-exchange-service` (the client that performed the exchange)
+- `sub`: same as the original agent token's subject (preserved through exchange)
 
 ## Caching Strategy
 
