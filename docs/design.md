@@ -149,28 +149,30 @@ The 30-second buffer before expiry prevents using tokens that are about to expir
 
 ## Keycloak Configuration
 
-### Required Features
+### Standard Token Exchange V2 (No Feature Flags)
 
-Keycloak 26 requires two preview features enabled via CLI args:
+Keycloak 26 ships with **Standard Token Exchange V2** built-in. No server-level feature
+flags (`--features=token-exchange,admin-fine-grained-authz`) are needed — this was validated
+by running the E2E tests with Keycloak in production mode (`start`) with zero preview features.
 
-```
---features=token-exchange,admin-fine-grained-authz:v1
-```
+Token exchange is configured per-client via two mechanisms:
 
-- **`token-exchange`**: Enables the RFC 8693 `urn:ietf:params:oauth:grant-type:token-exchange` grant type
-- **`admin-fine-grained-authz:v1`**: Enables per-client management permissions (the `/management/permissions` API), required to grant token-exchange rights to specific clients
+1. **Enable standard token exchange** by setting the `standard.token.exchange.enabled`
+   client attribute to `"true"` on:
+   - The **requesting client** (`token-exchange-service`) — calls the token endpoint
+   - The **target audience client** (`echo-tool`) — the audience the exchanged token is scoped to
 
-**Critical**: The `:v1` version suffix on `admin-fine-grained-authz` is mandatory. Without it, Keycloak 26 silently ignores the feature.
+2. **Add audience mappers** to control token routing:
+   - `echo-agent` → audience mapper for `token-exchange-service` (so agent tokens include
+     the exchange service in `aud` — required for subject token presentation)
+   - `token-exchange-service` → audience mapper for `echo-tool` (so Keycloak allows
+     exchanging tokens scoped to `echo-tool`)
 
-### Token Exchange Permission
+No fine-grained admin permissions (FGAP), no client policies, no permission associations
+are needed with this approach.
 
-After realm/client creation, three admin API steps are required:
-
-1. **Enable fine-grained permissions on the target client** (echo-tool) — auto-creates a `token-exchange` scope permission
-2. **Create a client policy** matching the exchange service client
-3. **Associate the policy** with the token-exchange permission
-
-The `deploy/03-keycloak-setup.sh` script handles all of this via the Keycloak admin REST API.
+The `deploy/03-keycloak-setup.sh` script handles all of this: realm creation, client
+registration, attribute patching, and audience mapper setup — all via the Keycloak admin REST API.
 
 ### Issuer URL Split
 
