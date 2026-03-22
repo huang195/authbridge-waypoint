@@ -164,11 +164,6 @@ When the token exchange request arrives, Keycloak validates four things:
    → Check: subject_token.aud includes "token-exchange-service"
    → Without this: "Client not allowed to exchange: not in subject token audience"
    → This is why echo-agent needs the token-exchange-service audience mapper
-
-4. Is echo-tool a valid exchange target?
-   → Check: standard.token.exchange.enabled = "true" on echo-tool
-   → Check: token-exchange-service has an audience mapper for echo-tool
-   → Without this: exchange fails or exchanged token missing correct audience
 ```
 
 The exchanged token has:
@@ -192,14 +187,9 @@ The setup script configures Keycloak via the admin REST API. Here's what it crea
 
 **Step 3 — Enable standard token exchange** (`standard.token.exchange.enabled = "true"`):
 
-Set on both `token-exchange-service` and `echo-tool`. This is a per-client attribute in Keycloak 26 that opts the client into the Standard Token Exchange V2 protocol. Without it, the exchange endpoint returns `"Client not allowed to exchange"`.
+Set on `token-exchange-service` only. This is a per-client attribute in Keycloak 26 that allows the client to call the token exchange endpoint. Without it, Keycloak returns `"Client not allowed to exchange"`.
 
-| Client | Why it needs the attribute |
-|--------|--------------------------|
-| `token-exchange-service` | It **calls** the exchange endpoint (it's the requesting client) |
-| `echo-tool` | It's **targeted** as the audience (Keycloak must allow tokens to be scoped to it) |
-
-`echo-agent` does NOT need this attribute — it never participates in the exchange call.
+Only the **requesting client** needs this attribute. The target audience client (`echo-tool`) and the token owner (`echo-agent`) do not.
 
 **Step 4 — Audience mappers** (control what goes into the `aud` claim of issued tokens):
 
@@ -243,7 +233,6 @@ Set on both `token-exchange-service` and `echo-tool`. This is a per-client attri
      ✓ token-exchange-service has standard.token.exchange.enabled
      ✓ subject_token is valid (signature, issuer, expiry)
      ✓ subject_token.aud includes token-exchange-service (mapper 2)
-     ✓ echo-tool has standard.token.exchange.enabled
 
    → Keycloak returns:
      { aud: echo-tool, azp: token-exchange-service, sub: <same user-id> }

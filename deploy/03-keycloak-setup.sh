@@ -104,20 +104,20 @@ get_client_uuid() {
 # ---------- Step 3: Ensure standard token exchange is enabled ----------
 
 echo ""
-echo "3. Ensuring standard token exchange is enabled on exchange clients..."
+echo "3. Ensuring standard token exchange is enabled on token-exchange-service..."
 
 # If the client already existed, the create_client call above won't update
 # attributes, so we patch it explicitly.
-for client_name in token-exchange-service echo-tool; do
-  CLIENT_UUID=$(get_client_uuid "$client_name")
-  curl -sf -X PUT "$KC_URL/admin/realms/$REALM/clients/$CLIENT_UUID" \
-    -H "Authorization: Bearer $ADMIN_TOKEN" \
-    -H "Content-Type: application/json" \
-    -d "$(curl -sf "$KC_URL/admin/realms/$REALM/clients/$CLIENT_UUID" \
-      -H "Authorization: Bearer $ADMIN_TOKEN" | \
-      jq '.attributes["standard.token.exchange.enabled"] = "true"')"
-  echo "   OK — enabled on $client_name"
-done
+# Only the requesting client (token-exchange-service) needs this attribute.
+# The target audience client (echo-tool) does NOT need it.
+CLIENT_UUID=$(get_client_uuid "token-exchange-service")
+curl -sf -X PUT "$KC_URL/admin/realms/$REALM/clients/$CLIENT_UUID" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "$(curl -sf "$KC_URL/admin/realms/$REALM/clients/$CLIENT_UUID" \
+    -H "Authorization: Bearer $ADMIN_TOKEN" | \
+    jq '.attributes["standard.token.exchange.enabled"] = "true"')"
+echo "   OK — enabled on token-exchange-service"
 
 # ---------- Step 4: Add audience mappers ----------
 
