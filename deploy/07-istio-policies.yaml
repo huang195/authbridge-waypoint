@@ -1,7 +1,6 @@
 ---
-# Inbound JWT validation (agent-ns waypoint):
-# Validates JWTs on requests TO the agent. No audience mapping for
-# echo-agent, so ext_authz validates and passes through without exchange.
+# Inbound (agent-ns waypoint):
+# ext_authz validates JWT; token aud includes "echo-agent" → pass through.
 apiVersion: security.istio.io/v1
 kind: AuthorizationPolicy
 metadata:

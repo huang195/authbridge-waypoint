@@ -24,7 +24,8 @@ up: ## Build, configure Keycloak, deploy everything
 		kind load docker-image $(REGISTRY)/$$svc:$(TAG) --name $(CLUSTER_NAME) 2>&1 | grep -v "^enabling"; \
 	done
 	@echo "=== Configuring Keycloak ==="
-	@kubectl port-forward -n keycloak svc/keycloak-service $(KC_PORT):8080 & PF_PID=$$!; \
+	@fuser -k $(KC_PORT)/tcp 2>/dev/null || true; \
+		kubectl port-forward -n keycloak svc/keycloak-service $(KC_PORT):8080 & PF_PID=$$!; \
 		sleep 5; \
 		bash deploy/03-keycloak-setup.sh; \
 		kill $$PF_PID 2>/dev/null || true
@@ -47,7 +48,8 @@ down: ## Remove all PoC resources including Keycloak realm
 	-kubectl delete -f deploy/05-token-exchange-svc.yaml 2>/dev/null
 	-kubectl delete ns agent-ns tool-ns 2>/dev/null
 	@echo "=== Removing Keycloak realm ==="
-	@kubectl port-forward -n keycloak svc/keycloak-service $(KC_PORT):8080 & PF_PID=$$!; \
+	@fuser -k $(KC_PORT)/tcp 2>/dev/null || true; \
+		kubectl port-forward -n keycloak svc/keycloak-service $(KC_PORT):8080 & PF_PID=$$!; \
 		sleep 3; \
 		ADMIN_TOKEN=$$(curl -sf -X POST "http://localhost:$(KC_PORT)/realms/master/protocol/openid-connect/token" \
 			-d "grant_type=password&client_id=admin-cli&username=admin&password=admin" | jq -r '.access_token'); \

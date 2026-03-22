@@ -1,5 +1,5 @@
 ---
-# agent-ns: ambient mode + agent-waypoint for inbound JWT validation
+# agent-ns: ambient mode + agent-waypoint (aud check: pass through or reject)
 apiVersion: v1
 kind: Namespace
 metadata:

@@ -39,19 +39,10 @@ func main() {
 }
 
 // handleCallTool calls the tool service with a JWT and returns the tool's response.
-// The JWT can be passed via the Authorization header or the AGENT_TOKEN env var.
 func handleCallTool(w http.ResponseWriter, r *http.Request) {
-	// Get the agent token: prefer header, fall back to env var
 	token := r.Header.Get("Authorization")
 	if token == "" {
-		envToken := os.Getenv("AGENT_TOKEN")
-		if envToken != "" {
-			token = "Bearer " + envToken
-		}
-	}
-
-	if token == "" {
-		http.Error(w, `{"error":"no token provided: set Authorization header or AGENT_TOKEN env"}`, http.StatusBadRequest)
+		http.Error(w, `{"error":"no token provided: set Authorization header"}`, http.StatusBadRequest)
 		return
 	}
 

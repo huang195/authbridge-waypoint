@@ -1,7 +1,7 @@
 // token-exchange-service implements Envoy's ext_authz gRPC v3 protocol.
-// It validates inbound JWTs and performs RFC 8693 token exchange via Keycloak,
-// replacing the agent's token with a tool-scoped token before the request
-// reaches the backend. Deployed as a shared service (not a sidecar).
+// It uses the token's aud claim to decide: if aud includes the destination
+// service name, pass through (already authorized); if not, exchange the token
+// for a scoped one via Keycloak RFC 8693. Deployed as a shared service.
 package main
 
 import (
@@ -186,7 +186,7 @@ func (s *authServer) Check(ctx context.Context, req *auth.CheckRequest) (*auth.C
 
 	log.Printf("validated JWT for subject=%s, client_id=%s", claims.Subject, claims.ClientID)
 
-	// 3. Determine destination audience from Host header
+	// 3. Extract destination host
 	host := headers[":authority"]
 	if host == "" {
 		host = headers["host"]
@@ -196,7 +196,7 @@ func (s *authServer) Check(ctx context.Context, req *auth.CheckRequest) (*auth.C
 		host = host[:idx]
 	}
 
-	// 3. Audience-based routing: does the token already have access to the destination?
+	// 4. Audience-based routing: does the token already have access to the destination?
 	//
 	// Derive the destination audience from the hostname (convention: service name = first
 	// segment of FQDN, e.g. "echo-tool.tool-ns.svc.cluster.local" → "echo-tool").
@@ -216,21 +216,21 @@ func (s *authServer) Check(ctx context.Context, req *auth.CheckRequest) (*auth.C
 
 	log.Printf("token missing audience %s, attempting exchange (token_aud=%v)", audience, claims.Audience)
 
-	// 4. Check cache
+	// 5. Check cache
 	cacheKey := hashCacheKey(tokenStr, audience)
 	if cached, ok := cache.get(cacheKey); ok {
 		log.Printf("cache hit for audience=%s", audience)
 		return allowedWithToken(cached), nil
 	}
 
-	// 5. Perform RFC 8693 token exchange
+	// 6. Perform RFC 8693 token exchange
 	exchangedToken, expiresIn, err := exchangeToken(ctx, tokenStr, audience)
 	if err != nil {
 		log.Printf("token exchange failed: %v", err)
 		return denied(codes.PermissionDenied, http.StatusForbidden, fmt.Sprintf("token exchange failed: %v", err)), nil
 	}
 
-	// 6. Cache the exchanged token
+	// 7. Cache the exchanged token
 	ttl := time.Duration(expiresIn)*time.Second - 30*time.Second
 	if ttl > 0 {
 		cache.set(cacheKey, exchangedToken, ttl)
@@ -468,6 +468,7 @@ func hashCacheKey(token, audience string) string {
 // ---------- ext_authz response helpers ----------
 
 func denied(code codes.Code, httpStatus int, msg string) *auth.CheckResponse {
+	body, _ := json.Marshal(map[string]string{"error": msg})
 	return &auth.CheckResponse{
 		Status: &rpc_status.Status{
 			Code:    int32(code),
@@ -478,7 +479,7 @@ func denied(code codes.Code, httpStatus int, msg string) *auth.CheckResponse {
 				Status: &envoy_type.HttpStatus{
 					Code: envoy_type.StatusCode(httpStatus),
 				},
-				Body: fmt.Sprintf(`{"error":"%s"}`, msg),
+				Body: string(body),
 				Headers: []*core.HeaderValueOption{
 					{
 						Header: &core.HeaderValue{

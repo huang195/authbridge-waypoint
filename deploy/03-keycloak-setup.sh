@@ -104,7 +104,7 @@ get_client_uuid() {
 # ---------- Step 3: Ensure standard token exchange is enabled ----------
 
 echo ""
-echo "3. Ensuring standard token exchange is enabled on token-exchange-service..."
+echo "3. Ensuring standard token exchange is enabled on exchange clients..."
 
 # If the client already existed, the create_client call above won't update
 # attributes, so we patch it explicitly.

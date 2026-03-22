@@ -1,7 +1,7 @@
 ---
-# ServiceAccount for echo-agent — the waypoint is attached here.
-# This makes the waypoint intercept both inbound and outbound traffic
-# for workloads using this SA.
+# ServiceAccount for echo-agent.
+# The use-waypoint label is redundant with the namespace-level label
+# but makes the waypoint attachment explicit per-workload.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
