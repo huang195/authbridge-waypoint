@@ -30,9 +30,8 @@ All three face the same fundamental TLS limitation: token exchange cannot be per
 | | Waypoint | AuthBridge | Klaviger |
 |---|---|---|---|
 | **Platform lock-in** | Istio ambient mesh | None | None |
-| **Per-pod privilege** | None | NET_ADMIN | None |
+| **Per-pod privilege** | None | NET_ADMIN (blocked on EKS Fargate, GKE Autopilot) | None |
 | **App change required** | None | None | `HTTP_PROXY` env var |
-| **Outbound coverage** | Full (with infra per destination) | Full | Partial |
 | **Infra per new destination** | Waypoint or egress GW + policy | None | None |
 | **Failure domain** | Shared (all pods in namespace) | Per pod | Per pod |
 | **Runs outside Kubernetes** | No | No | Yes |
@@ -44,11 +43,19 @@ AuthBridge uses an admission webhook to inject sidecars automatically, so the de
 | | Waypoint | AuthBridge (with webhook) | Klaviger |
 |---|---|---|---|
 | **Developer writes** | Plain Deployment | Plain Deployment | Plain Deployment + `HTTP_PROXY` env |
-| **What's injected** | Nothing | Sidecar + init container + secrets + ConfigMap | Sidecar + ConfigMap |
-| **NET_ADMIN at runtime** | No | Yes (init container) | No |
+| **What's injected at runtime** | Nothing | Sidecar + init container + secrets + ConfigMap | Sidecar + ConfigMap |
 | **Containers running per pod** | 1 | 3 | 2 |
 | **Extra infra to manage** | Waypoint (platform-managed) | Webhook + SPIFFE (platform-managed) | Per-pod config |
-| **Blocked on restricted clusters** | No | Yes (NET_ADMIN) | No |
+
+## Credential Isolation
+
+Token exchange requires a client secret to authenticate to Keycloak. Where that secret lives determines the blast radius of a compromised pod.
+
+| | Waypoint | AuthBridge | Klaviger |
+|---|---|---|---|
+| **Exchange credentials location** | Shared ext_authz pod in `kagenti-system` | Every app pod (Secret mount or `/shared/` file) | Every app pod (config file or env var) |
+| **App pod has access to exchange secret** | No | Yes | Yes |
+| **Compromised app can steal exchange credentials** | No | Yes | Yes |
 
 ## Resource Cost (5000 pods, 20 namespaces)
 
