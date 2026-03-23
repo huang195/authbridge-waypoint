@@ -37,6 +37,19 @@ All three face the same fundamental TLS limitation: token exchange cannot be per
 | **Failure domain** | Shared (all pods in namespace) | Per pod | Per pod |
 | **Runs outside Kubernetes** | No | No | Yes |
 
+## Developer Experience
+
+AuthBridge uses an admission webhook to inject sidecars automatically, so the developer-facing YAML is similar to Waypoint. The differences are at runtime:
+
+| | Waypoint | AuthBridge (with webhook) | Klaviger |
+|---|---|---|---|
+| **Developer writes** | Plain Deployment | Plain Deployment | Plain Deployment + `HTTP_PROXY` env |
+| **What's injected** | Nothing | Sidecar + init container + secrets + ConfigMap | Sidecar + ConfigMap |
+| **NET_ADMIN at runtime** | No | Yes (init container) | No |
+| **Containers running per pod** | 1 | 3 | 2 |
+| **Extra infra to manage** | Waypoint (platform-managed) | Webhook + SPIFFE (platform-managed) | Per-pod config |
+| **Blocked on restricted clusters** | No | Yes (NET_ADMIN) | No |
+
 ## Resource Cost (5000 pods, 20 namespaces)
 
 | | Waypoint | AuthBridge | Klaviger |
