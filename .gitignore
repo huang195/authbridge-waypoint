@@ -1,4 +1,5 @@
 bin/
-/echo-agent
+/demo-agent
 /echo-tool
+/time-tool
 /token-exchange-service
