@@ -1,6 +1,6 @@
 ---
 # Inbound (agent-ns waypoint):
-# ext_authz validates JWT; token aud includes "echo-agent" → pass through.
+# ext_authz validates JWT; token aud includes "demo-agent" → pass through.
 apiVersion: security.istio.io/v1
 kind: AuthorizationPolicy
 metadata:
@@ -18,9 +18,10 @@ spec:
     - {}
 ---
 # Outbound token exchange (tool-ns waypoint):
-# When an agent calls a tool, the tool-ns waypoint intercepts the request
-# and calls ext_authz to validate the agent's JWT and exchange it for a
-# tool-scoped token via RFC 8693.
+# When the agent calls ANY tool in tool-ns, the waypoint intercepts the
+# request and calls ext_authz. The audience is derived from the destination
+# hostname (e.g. echo-tool, time-tool), so adding a new tool requires
+# no changes to this policy.
 apiVersion: security.istio.io/v1
 kind: AuthorizationPolicy
 metadata:

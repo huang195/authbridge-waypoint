@@ -8,7 +8,8 @@ metadata:
     istio.io/dataplane-mode: ambient
     istio.io/use-waypoint: agent-waypoint
 ---
-# tool-ns: ambient mode + tool-waypoint for token exchange
+# tool-ns: ambient mode + tool-waypoint for token exchange.
+# All tools share this namespace — adding a tool is just a Deployment.
 apiVersion: v1
 kind: Namespace
 metadata:

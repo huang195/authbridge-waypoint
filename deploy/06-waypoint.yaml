@@ -16,8 +16,9 @@ spec:
       protocol: HBONE
 ---
 # Tool-side waypoint: exchanges agent tokens for tool-scoped tokens.
-# Intercepts requests destined for tools and calls ext_authz to perform
-# RFC 8693 token exchange before the request reaches the tool.
+# Intercepts requests destined for ANY tool in tool-ns and calls ext_authz
+# to perform RFC 8693 token exchange. Adding a new tool requires no changes
+# to this waypoint or its policy — the audience is derived from the hostname.
 apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway
 metadata:

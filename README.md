@@ -16,37 +16,44 @@ This adds ~150-200MB memory overhead per pod and requires privileged containers.
 ## Architecture
 
 ```
-       agent-ns                                              tool-ns
-┌─────────────────────────┐                       ┌──────────────────────────────┐
-│                         │                       │                              │
-│  Agent Pod              │                       │  tool-waypoint (L7)          │
-│  (1 container)          │──── ztunnel (mTLS) ──>│  │                           │
-│                         │                       │  ├─ ext_authz                │
-│  agent-waypoint (L7)    │                       │  │  aud missing "echo-tool"  │
-│  │                      │                       │  │  → exchange via RFC 8693  │
-│  ├─ ext_authz           │                       │  │  → replace Authorization  │
-│  │  aud has "echo-agent"│                       │  ▼                           │
-│  │  → pass through      │                       │  Tool Pod (1 container)      │
-│  ▼                      │                       │                              │
-└─────────────────────────┘                       └──────────────────────────────┘
+       agent-ns                                    tool-ns
+┌─────────────────────┐       ┌───────────────────────────────────────┐
+│                     │       │                                       │
+│  Agent Pod          │       │  tool-waypoint (L7)                   │
+│  (1 container)      │──────>│  │                                    │
+│                     │       │  ├─ ext_authz                         │
+│  agent-waypoint(L7) │       │  │  aud missing destination           │
+│  │                  │       │  │  → exchange via RFC 8693            │
+│  ├─ ext_authz       │       │  │                                    │
+│  │  aud has         │       │  ▼                                    │
+│  │  "demo-agent"    │       │  ┌─────────────┐  ┌─────────────┐    │
+│  │  → pass through  │       │  │ echo-tool   │  │ time-tool   │    │
+│  ▼                  │       │  │ (1 ctr)     │  │ (1 ctr)     │    │
+└─────────────────────┘       │  └─────────────┘  └─────────────┘    │
+                              │                                       │
+                              └───────────────────────────────────────┘
 ```
 
-**Two waypoints, one shared ext_authz service, zero configuration:**
+**Two waypoints, one shared ext_authz service, zero per-tool config:**
 
 - **agent-waypoint** (agent-ns) — token `aud` includes destination → pass through
 - **tool-waypoint** (tool-ns) — token `aud` missing destination → exchange via RFC 8693
 
+Both tools share the same waypoint and policy. Adding a tool requires only a Keycloak client and a Deployment — no new waypoint, policy, or namespace.
+
 The service derives the destination audience from the hostname (convention: K8s service name = first segment of FQDN). No audience maps or direction config needed — the token's `aud` claim is the signal.
 
-**Token flow:**
+**Token flow (same for any tool):**
 
-1. User calls `echo-agent` with a JWT (`aud` includes `echo-agent`)
-2. agent-waypoint: ext_authz validates JWT, `aud` includes `echo-agent` → pass through
-3. `echo-agent` forwards the request to `echo-tool`
-4. tool-waypoint: ext_authz validates JWT, `aud` missing `echo-tool` → exchange
+1. User calls `demo-agent` with a JWT (`aud` includes `demo-agent`)
+2. agent-waypoint: ext_authz validates JWT, `aud` includes `demo-agent` → pass through
+3. `demo-agent` forwards the request to a tool (`echo-tool` or `time-tool`)
+4. tool waypoint: ext_authz validates JWT, `aud` missing tool name → exchange
    - Calls Keycloak RFC 8693 token exchange
    - Replaces `Authorization` header with tool-scoped token
-5. `echo-tool` receives the exchanged token (`aud=echo-tool`, `sub` preserved)
+5. Tool receives the exchanged token (`aud=<tool-name>`, `sub` preserved)
+
+Adding a new tool to an existing namespace requires only: 1 Keycloak client + audience mapper, 1 Deployment. No changes to the agent, token-exchange-service, waypoint, policy, or existing tools.
 
 ## What This Proves
 
@@ -81,7 +88,7 @@ Istio waypoints are **strictly destination-side** — they intercept traffic goi
 | Waypoint | Namespace | waypoint-for | Responsibility |
 |----------|-----------|-------------|----------------|
 | agent-waypoint | agent-ns | all | `aud` includes destination → pass through |
-| tool-waypoint | tool-ns | service | `aud` missing destination → exchange |
+| tool-waypoint | tool-ns | service | `aud` missing destination → exchange (covers all tools in tool-ns) |
 
 **Istio policy chain:**
 
@@ -89,7 +96,7 @@ Istio waypoints are **strictly destination-side** — they intercept traffic goi
 Inbound: User → agent-waypoint → Agent Pod
                     │
                     └─ ext_authz: validate JWT, check aud
-                       aud includes "echo-agent" → pass through
+                       aud includes "demo-agent" → pass through
 
 Outbound: Agent Pod → ztunnel → tool-waypoint → Tool Pod
                                      │
@@ -163,7 +170,7 @@ When the token exchange request arrives, Keycloak validates four things:
 3. Is token-exchange-service in the subject_token's audience?
    → Check: subject_token.aud includes "token-exchange-service"
    → Without this: "Client not allowed to exchange: not in subject token audience"
-   → This is why echo-agent needs the token-exchange-service audience mapper
+   → This is why demo-agent needs the token-exchange-service audience mapper
 ```
 
 The exchanged token has:
@@ -177,27 +184,29 @@ The setup script configures Keycloak via the admin REST API. Here's what it crea
 
 **Step 1 — Realm**: Creates `waypoint-poc` realm.
 
-**Step 2 — Three clients:**
+**Step 2 — Four clients:**
 
 | Client | Role | Secret |
 |--------|------|--------|
-| `echo-agent` | The agent. Users obtain tokens from this client via `client_credentials` grant. | `agent-secret` |
-| `echo-tool` | The tool. Represents the target audience for exchanged tokens. Never called directly by users. | `tool-secret` |
+| `demo-agent` | The agent. Users obtain tokens from this client via `client_credentials` grant. | `agent-secret` |
+| `echo-tool` | A tool. Represents the target audience for exchanged tokens. | `tool-secret` |
+| `time-tool` | A tool. Second tool for multi-tool demo. | `time-tool-secret` |
 | `token-exchange-service` | The shared ext_authz service. Authenticates to Keycloak to perform exchanges on behalf of agents. | `exchange-secret` |
 
 **Step 3 — Enable standard token exchange** (`standard.token.exchange.enabled = "true"`):
 
 Set on `token-exchange-service` only. This is a per-client attribute in Keycloak 26 that allows the client to call the token exchange endpoint. Without it, Keycloak returns `"Client not allowed to exchange"`.
 
-Only the **requesting client** needs this attribute. The target audience client (`echo-tool`) and the token owner (`echo-agent`) do not.
+Only the **requesting client** needs this attribute. The target audience client (`echo-tool`) and the token owner (`demo-agent`) do not.
 
 **Step 4 — Audience mappers** (control what goes into the `aud` claim of issued tokens):
 
 | # | Mapper on client | Adds to `aud` | Why |
 |---|-----------------|---------------|-----|
-| 1 | `echo-agent` | `echo-agent` | Agent tokens include the agent's own name. This is how the ext_authz knows to pass through on inbound: `aud` includes the destination (`echo-agent`). |
-| 2 | `echo-agent` | `token-exchange-service` | **Required by Keycloak.** When `token-exchange-service` presents the agent's token as `subject_token`, Keycloak checks that the requesting client (`token-exchange-service`) is in the subject token's `aud`. Without this mapper, the exchange fails. |
-| 3 | `token-exchange-service` | `echo-tool` | When Keycloak issues the exchanged token, this mapper ensures `echo-tool` appears in the `aud` claim. This is how the tool knows the token is meant for it. |
+| 1 | `demo-agent` | `demo-agent` | Agent tokens include the agent's own name. This is how the ext_authz knows to pass through on inbound: `aud` includes the destination (`demo-agent`). |
+| 2 | `demo-agent` | `token-exchange-service` | **Required by Keycloak.** When `token-exchange-service` presents the agent's token as `subject_token`, Keycloak checks that the requesting client (`token-exchange-service`) is in the subject token's `aud`. Without this mapper, the exchange fails. |
+| 3 | `token-exchange-service` | `echo-tool` | When Keycloak issues the exchanged token, this mapper ensures `echo-tool` appears in the `aud` claim. |
+| 4 | `token-exchange-service` | `time-tool` | Same as above for the second tool. Each new tool needs one audience mapper on `token-exchange-service`. |
 
 **Step 5 — Verify**: The script obtains an agent token and performs a test exchange to confirm everything is wired correctly.
 
@@ -205,19 +214,19 @@ Only the **requesting client** needs this attribute. The target audience client 
 
 ```
 1. User authenticates:
-   POST /token  client_id=echo-agent  client_secret=agent-secret
+   POST /token  client_id=demo-agent  client_secret=agent-secret
    grant_type=client_credentials
 
    → Keycloak returns:
-     { aud: [echo-agent, token-exchange-service, account], azp: echo-agent, sub: <user-id> }
+     { aud: [demo-agent, token-exchange-service, account], azp: demo-agent, sub: <user-id> }
               ↑ mapper 1   ↑ mapper 2
 
-2. User calls echo-agent with this token.
+2. User calls demo-agent with this token.
 
 3. agent-waypoint intercepts (inbound):
-   ext_authz: aud includes "echo-agent"? → YES → pass through
+   ext_authz: aud includes "demo-agent"? → YES → pass through
 
-4. echo-agent forwards request to echo-tool.
+4. demo-agent forwards request to echo-tool.
 
 5. tool-waypoint intercepts (outbound):
    ext_authz: aud includes "echo-tool"? → NO → exchange
@@ -272,8 +281,9 @@ make down   # remove everything (K8s resources + Keycloak realm)
 
 | Component | Path | Description |
 |-----------|------|-------------|
-| `echo-agent` | `cmd/echo-agent/` | Receives a user token, forwards it to echo-tool |
+| `demo-agent` | `cmd/demo-agent/` | Receives a user token, forwards it to echo-tool or time-tool |
 | `echo-tool` | `cmd/echo-tool/` | Echoes request headers as JSON — verifies the exchanged token |
+| `time-tool` | `cmd/time-tool/` | Returns current time + JWT claims — second tool for multi-tool demo |
 | `token-exchange-service` | `cmd/token-exchange-service/` | ext_authz gRPC service: JWT validation + RFC 8693 token exchange |
 
 ## End-to-End Tests
@@ -281,7 +291,8 @@ make down   # remove everything (K8s resources + Keycloak realm)
 | Test | Input | Expected |
 |------|-------|----------|
 | **Invalid token rejected** | Invalid token → agent-waypoint | ext_authz rejects (HTTP 401) before reaching agent |
-| **Valid token exchanged** | Valid token → agent-waypoint → echo-agent → tool-waypoint | Token exchanged; echo-tool receives `aud=echo-tool`, `sub` preserved |
+| **Valid token → echo-tool** | Valid token → demo-agent → tool-waypoint | Token exchanged; echo-tool receives `aud=echo-tool`, `sub` preserved |
+| **Valid token → time-tool** | Valid token → demo-agent → tool-waypoint | Token exchanged; time-tool receives `aud=time-tool`, `sub` preserved |
 
 ```bash
 make test
@@ -291,7 +302,7 @@ make test
 
 1. **Waypoints are destination-side only** — Istio waypoints intercept traffic going TO services, not FROM. Outbound token exchange requires a waypoint in the tool namespace.
 2. **CUSTOM action does not support `from.source.namespaces`** — Namespace filtering must use a separate ALLOW policy.
-3. **One waypoint per tool namespace** — each tool namespace needs its own waypoint. Managed declaratively via namespace labels and AuthorizationPolicy CRs.
+3. **One waypoint per tool namespace** — each tool namespace needs its own waypoint, but all tools within the namespace share it. Managed declaratively via namespace labels and AuthorizationPolicy CRs.
 4. **No mTLS to Keycloak** — the token-exchange-service calls Keycloak over plain HTTP. Production should use TLS.
 5. **In-memory cache** — token cache doesn't survive pod restarts. Production could use Redis.
 6. **Convention: Keycloak client ID must match K8s service name** — the audience is derived from the hostname. If they differ, an override mechanism would be needed (not yet implemented).

@@ -90,8 +90,9 @@ create_client() {
   fi
 }
 
-create_client "echo-agent" "agent-secret" ""
+create_client "demo-agent" "agent-secret" ""
 create_client "echo-tool" "tool-secret" ""
+create_client "time-tool" "time-tool-secret" ""
 create_client "token-exchange-service" "exchange-secret" \
   ', "attributes": {"standard.token.exchange.enabled": "true"}'
 
@@ -156,26 +157,27 @@ add_audience_mapper() {
   fi
 }
 
-AGENT_UUID=$(get_client_uuid "echo-agent")
+AGENT_UUID=$(get_client_uuid "demo-agent")
 EXCHANGE_UUID=$(get_client_uuid "token-exchange-service")
 
-# Agent tokens include echo-agent as their primary audience (the token owner).
-add_audience_mapper "$AGENT_UUID" "echo-agent-audience" "echo-agent"
+# Agent tokens include demo-agent as their primary audience (the token owner).
+add_audience_mapper "$AGENT_UUID" "demo-agent-audience" "demo-agent"
 
 # Agent tokens must also include token-exchange-service in the audience so the
 # exchange service can present them as subject_token in the standard token exchange.
 add_audience_mapper "$AGENT_UUID" "token-exchange-service-audience" "token-exchange-service"
 
-# token-exchange-service must list echo-tool as a valid audience so Keycloak
-# allows exchanging tokens scoped to echo-tool.
+# token-exchange-service must list each tool as a valid audience so Keycloak
+# allows exchanging tokens scoped to that tool.
 add_audience_mapper "$EXCHANGE_UUID" "echo-tool-audience" "echo-tool"
+add_audience_mapper "$EXCHANGE_UUID" "time-tool-audience" "time-tool"
 
 # ---------- Verify: test token exchange ----------
 
 echo ""
 echo "=== Verifying token exchange ==="
 AGENT_TOKEN=$(curl -sf -X POST "$KC_URL/realms/$REALM/protocol/openid-connect/token" \
-  -d "grant_type=client_credentials&client_id=echo-agent&client_secret=agent-secret" | jq -r '.access_token')
+  -d "grant_type=client_credentials&client_id=demo-agent&client_secret=agent-secret" | jq -r '.access_token')
 
 EXCHANGE_RESULT=$(curl -s -X POST "$KC_URL/realms/$REALM/protocol/openid-connect/token" \
   -d "grant_type=urn:ietf:params:oauth:grant-type:token-exchange" \

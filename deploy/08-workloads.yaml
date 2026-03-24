@@ -1,43 +1,45 @@
 ---
-# ServiceAccount for echo-agent.
+# ServiceAccount for demo-agent.
 # The use-waypoint label is redundant with the namespace-level label
 # but makes the waypoint attachment explicit per-workload.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: echo-agent
+  name: demo-agent
   namespace: agent-ns
   labels:
     istio.io/use-waypoint: agent-waypoint
 ---
-# echo-agent: the "agent" that calls the tool
+# demo-agent: the "agent" that calls downstream tools
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: echo-agent
+  name: demo-agent
   namespace: agent-ns
   labels:
-    app: echo-agent
+    app: demo-agent
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: echo-agent
+      app: demo-agent
   template:
     metadata:
       labels:
-        app: echo-agent
+        app: demo-agent
     spec:
-      serviceAccountName: echo-agent
+      serviceAccountName: demo-agent
       containers:
-        - name: echo-agent
-          image: localhost:5000/echo-agent:latest
+        - name: demo-agent
+          image: localhost:5000/demo-agent:latest
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080
           env:
             - name: TOOL_URL
               value: "http://echo-tool.tool-ns.svc.cluster.local:8080/echo"
+            - name: TIME_TOOL_URL
+              value: "http://time-tool.tool-ns.svc.cluster.local:8080/time"
           readinessProbe:
             httpGet:
               path: /healthz
@@ -55,16 +57,16 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: echo-agent
+  name: demo-agent
   namespace: agent-ns
 spec:
   selector:
-    app: echo-agent
+    app: demo-agent
   ports:
     - port: 8080
       targetPort: 8080
 ---
-# echo-tool: the "tool" that echoes headers.
+# echo-tool: echoes request headers as JSON.
 # No sidecar — just a plain pod in ambient mesh. The tool-ns waypoint
 # handles token exchange transparently.
 apiVersion: apps/v1
@@ -112,6 +114,58 @@ metadata:
 spec:
   selector:
     app: echo-tool
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+# time-tool: returns current time + received JWT claims.
+# Same namespace as echo-tool — shares the same waypoint and policy.
+# Adding this tool required zero changes to existing infrastructure.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: time-tool
+  namespace: tool-ns
+  labels:
+    app: time-tool
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: time-tool
+  template:
+    metadata:
+      labels:
+        app: time-tool
+    spec:
+      containers:
+        - name: time-tool
+          image: localhost:5000/time-tool:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            requests:
+              memory: 32Mi
+              cpu: 25m
+            limits:
+              memory: 64Mi
+              cpu: 100m
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: time-tool
+  namespace: tool-ns
+spec:
+  selector:
+    app: time-tool
   ports:
     - port: 8080
       targetPort: 8080

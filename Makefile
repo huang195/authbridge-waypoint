@@ -2,7 +2,7 @@ REGISTRY ?= localhost:5000
 TAG ?= latest
 GOARCH ?= $(shell go env GOARCH)
 CLUSTER_NAME ?= kagenti
-SERVICES := echo-agent echo-tool token-exchange-service
+SERVICES := demo-agent echo-tool time-tool token-exchange-service
 REALM := waypoint-poc
 KC_PORT := 18080
 

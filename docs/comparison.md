@@ -65,3 +65,13 @@ Token exchange requires a client secret to authenticate to Keycloak. Where that 
 | **Per-pod memory** | 0 | ~200Mi | ~64Mi |
 | **Shared infra** | 20 waypoints + 1 ext_authz | None | None |
 | **Total added memory** | **~5Gi** | **~1Ti** | **~320Gi** |
+
+## Day 2 Operations
+
+With per-pod sidecars, updating auth logic requires a fleet-wide rolling restart. With shared infrastructure, it's a single deployment.
+
+| | Waypoint | AuthBridge | Klaviger |
+|---|---|---|---|
+| **Patch token exchange logic** | 1 Deployment rollout | Rolling restart of every pod | Rolling restart of every pod |
+| **Rotate exchange credentials** | 1 Secret update | Update Secret in every namespace | Update config in every namespace |
+| **Patch auth vulnerability** | 1 image update, seconds | New sidecar image, rolling restart 5000 pods | New sidecar image, rolling restart 5000 pods |

@@ -205,7 +205,7 @@ func (s *authServer) Check(ctx context.Context, req *auth.CheckRequest) (*auth.C
 	// If the token's aud DOES NOT include it → exchange for a scoped token via RFC 8693.
 	//
 	// This naturally handles both inbound and outbound:
-	//   Inbound (user→agent): token aud includes "echo-agent" → pass through
+	//   Inbound (user→agent): token aud includes "demo-agent" → pass through
 	//   Outbound (agent→tool): token aud missing "echo-tool" → exchange
 	audience := serviceNameFromHost(host)
 
