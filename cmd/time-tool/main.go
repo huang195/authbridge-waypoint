@@ -20,7 +20,7 @@ func main() {
 		port = "8080"
 	}
 
-	http.HandleFunc("/time", handleTime)
+	http.HandleFunc("/", handleTime)
 	http.HandleFunc("/healthz", handleHealthz)
 
 	log.Printf("time-tool listening on :%s", port)

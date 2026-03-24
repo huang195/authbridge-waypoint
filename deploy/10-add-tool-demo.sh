@@ -155,21 +155,21 @@ run "kubectl -n tool-ns get pods"
 
 # ---------- Step 3: Test it ----------
 
-narrate "Step 3: Call weather-tool — waypoint should exchange the token"
+narrate "Step 3: Call weather-tool through demo-agent — no code changes to the agent"
 
 run "USER_TOKEN=\$(curl -sf -X POST '$KC_URL/realms/$REALM/protocol/openid-connect/token' \\
   -d 'grant_type=client_credentials' \\
   -d 'client_id=demo-agent' \\
   -d 'client_secret=agent-secret' | jq -r '.access_token')"
 
-WEATHER_URL="http://weather-tool.tool-ns.svc.cluster.local:8080/"
+AGENT_URL="http://demo-agent.agent-ns.svc.cluster.local:8080/call/weather-tool"
 kubectl delete pod -n agent-ns curl-weather --force --grace-period=0 2>/dev/null || true
 
 run "kubectl run curl-weather -n agent-ns \\
   --image=curlimages/curl:latest \\
   --restart=Never \\
   --command -- sh -c \\
-  \"curl -s -H 'Authorization: Bearer $USER_TOKEN' '$WEATHER_URL'\""
+  \"curl -s -H 'Authorization: Bearer $USER_TOKEN' '$AGENT_URL'\""
 
 kubectl wait --for=condition=ready pod/curl-weather -n agent-ns --timeout=30s 2>/dev/null || true
 sleep 5

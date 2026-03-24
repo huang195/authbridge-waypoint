@@ -36,10 +36,8 @@ spec:
           ports:
             - containerPort: 8080
           env:
-            - name: TOOL_URL
-              value: "http://echo-tool.tool-ns.svc.cluster.local:8080/echo"
-            - name: TIME_TOOL_URL
-              value: "http://time-tool.tool-ns.svc.cluster.local:8080/time"
+            - name: TOOL_NS
+              value: "tool-ns"
           readinessProbe:
             httpGet:
               path: /healthz

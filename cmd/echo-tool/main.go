@@ -18,7 +18,7 @@ func main() {
 		port = "8080"
 	}
 
-	http.HandleFunc("/echo", handleEcho)
+	http.HandleFunc("/", handleEcho)
 	http.HandleFunc("/healthz", handleHealthz)
 
 	log.Printf("echo-tool listening on :%s", port)

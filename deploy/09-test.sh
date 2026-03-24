@@ -12,8 +12,8 @@
 #     ▼
 #   demo-agent (agent-ns)
 #     │
-#     ├─ /call-tool → echo-tool.tool-ns  (forwards user token)
-#     ├─ /call-time → time-tool.tool-ns  (forwards user token)
+#     ├─ /call/echo-tool → echo-tool.tool-ns  (forwards user token)
+#     ├─ /call/time-tool → time-tool.tool-ns  (forwards user token)
 #     ▼
 #   ztunnel (L4 mTLS)
 #     │
@@ -35,8 +35,8 @@ set -euo pipefail
 KEYCLOAK_SVC="${KEYCLOAK_SVC:-keycloak-service}"
 KEYCLOAK_NS="${KEYCLOAK_NS:-keycloak}"
 REALM="waypoint-poc"
-AGENT_TOOL_URL="http://demo-agent.agent-ns.svc.cluster.local:8080/call-tool"
-AGENT_TIME_URL="http://demo-agent.agent-ns.svc.cluster.local:8080/call-time"
+AGENT_TOOL_URL="http://demo-agent.agent-ns.svc.cluster.local:8080/call/echo-tool"
+AGENT_TIME_URL="http://demo-agent.agent-ns.svc.cluster.local:8080/call/time-tool"
 INVALID_TOKEN="invalid-token-12345"
 PASS=0
 FAIL=0

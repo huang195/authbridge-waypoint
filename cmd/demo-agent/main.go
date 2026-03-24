@@ -3,6 +3,10 @@
 // downstream tools. The waypoint's ext_authz intercepts each request,
 // validates the JWT, and exchanges it for a tool-scoped token before
 // the request reaches the tool.
+//
+// Routes:
+//   GET /call/{tool-name}  → forwards to http://{tool-name}.{TOOL_NS}.svc.cluster.local:8080/
+//   GET /healthz           → health check
 package main
 
 import (
@@ -12,13 +16,13 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 )
 
 var (
-	toolURL     string
-	timeToolURL string
-	httpClient  = &http.Client{Timeout: 10 * time.Second}
+	toolNS     string
+	httpClient = &http.Client{Timeout: 10 * time.Second}
 )
 
 func main() {
@@ -27,42 +31,37 @@ func main() {
 		port = "8080"
 	}
 
-	toolURL = os.Getenv("TOOL_URL")
-	if toolURL == "" {
-		toolURL = "http://echo-tool.tool-ns.svc.cluster.local:8080/echo"
+	toolNS = os.Getenv("TOOL_NS")
+	if toolNS == "" {
+		toolNS = "tool-ns"
 	}
 
-	timeToolURL = os.Getenv("TIME_TOOL_URL")
-	if timeToolURL == "" {
-		timeToolURL = "http://time-tool.tool-ns.svc.cluster.local:8080/time"
-	}
-
-	http.HandleFunc("/call-tool", handleCallTool)
-	http.HandleFunc("/call-time", handleCallTime)
+	http.HandleFunc("/call/", handleCall)
 	http.HandleFunc("/healthz", handleHealthz)
 
-	log.Printf("demo-agent listening on :%s, tool URL: %s, time-tool URL: %s", port, toolURL, timeToolURL)
+	log.Printf("demo-agent listening on :%s, tool namespace: %s", port, toolNS)
 	log.Fatal(http.ListenAndServe(":"+port, nil))
 }
 
-// handleCallTool calls the echo-tool service with the user's JWT.
-func handleCallTool(w http.ResponseWriter, r *http.Request) {
-	callTool(w, r, "echo-tool", toolURL)
-}
+// handleCall forwards the request to any tool by name.
+// GET /call/echo-tool  → http://echo-tool.tool-ns.svc.cluster.local:8080/
+// GET /call/time-tool  → http://time-tool.tool-ns.svc.cluster.local:8080/
+func handleCall(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimPrefix(r.URL.Path, "/call/")
+	if name == "" {
+		http.Error(w, `{"error":"usage: /call/{tool-name}"}`, http.StatusBadRequest)
+		return
+	}
 
-// handleCallTime calls the time-tool service with the user's JWT.
-func handleCallTime(w http.ResponseWriter, r *http.Request) {
-	callTool(w, r, "time-tool", timeToolURL)
-}
-
-func callTool(w http.ResponseWriter, r *http.Request, name, url string) {
 	token := r.Header.Get("Authorization")
 	if token == "" {
 		http.Error(w, `{"error":"no token provided: set Authorization header"}`, http.StatusBadRequest)
 		return
 	}
 
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, url, nil)
+	toolURL := fmt.Sprintf("http://%s.%s.svc.cluster.local:8080/", name, toolNS)
+
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, toolURL, nil)
 	if err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":"creating request: %v"}`, err), http.StatusInternalServerError)
 		return
@@ -84,7 +83,7 @@ func callTool(w http.ResponseWriter, r *http.Request, name, url string) {
 
 	result := map[string]any{
 		"agent_action":      "called " + name,
-		"tool_url":          url,
+		"tool_url":          toolURL,
 		"tool_status":       resp.StatusCode,
 		"tool_response_raw": json.RawMessage(body),
 	}
