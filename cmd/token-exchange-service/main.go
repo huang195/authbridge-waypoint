@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"strings"
 	"sync"
 	"time"
@@ -65,15 +66,33 @@ type jwksCache struct {
 	httpClient *http.Client
 }
 
+// defaultBypassPaths are paths that skip JWT validation when no Authorization
+// header is present. Matches AuthBridge's default bypass list.
+// Override via BYPASS_INBOUND_PATHS env var (comma-separated).
+var defaultBypassPaths = []string{"/.well-known/*", "/healthz", "/readyz", "/livez"}
+
 var (
-	cfg    Config
-	cache  *tokenCache
-	jwks   *jwksCache
-	client = &http.Client{Timeout: 10 * time.Second}
+	cfg              Config
+	cache            *tokenCache
+	jwks             *jwksCache
+	client           = &http.Client{Timeout: 10 * time.Second}
+	bypassPaths      = defaultBypassPaths
 )
 
 func main() {
 	cfg = loadConfig()
+
+	// Initialize bypass paths (override defaults via env var)
+	if envPaths, ok := os.LookupEnv("BYPASS_INBOUND_PATHS"); ok {
+		bypassPaths = nil
+		for _, p := range strings.Split(envPaths, ",") {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				bypassPaths = append(bypassPaths, p)
+			}
+		}
+	}
+	log.Printf("bypass paths: %v", bypassPaths)
 
 	cache = &tokenCache{items: make(map[string]cachedToken)}
 
@@ -154,6 +173,23 @@ func serviceNameFromHost(host string) string {
 	return strings.SplitN(host, ".", 2)[0]
 }
 
+// ---------- Bypass path matching ----------
+
+// matchBypassPath checks if the request path matches any configured bypass pattern.
+// Uses Go's path.Match syntax (e.g., "/.well-known/*" matches "/.well-known/agent.json").
+func matchBypassPath(requestPath string) bool {
+	if idx := strings.IndexByte(requestPath, '?'); idx >= 0 {
+		requestPath = requestPath[:idx]
+	}
+	requestPath = path.Clean(requestPath)
+	for _, pattern := range bypassPaths {
+		if matched, err := path.Match(pattern, requestPath); err == nil && matched {
+			return true
+		}
+	}
+	return false
+}
+
 // ---------- ext_authz gRPC implementation ----------
 
 type authServer struct{}
@@ -167,13 +203,15 @@ func (s *authServer) Check(ctx context.Context, req *auth.CheckRequest) (*auth.C
 	headers := httpReq.GetHeaders()
 
 	// 1. Extract Authorization header
-	// If no token is present, pass through — the ext_authz validates/exchanges
-	// tokens that ARE present, not enforce authentication. Use DENY/ALLOW
-	// policies to require authentication on specific services.
 	authHeader := headers["authorization"]
 	if authHeader == "" {
-		log.Printf("no Authorization header, passing through (path=%s)", httpReq.GetPath())
-		return allowed(), nil
+		// Only allow unauthenticated requests to bypass paths (health checks, agent card discovery).
+		// All other paths require a Bearer token.
+		if matchBypassPath(httpReq.GetPath()) {
+			log.Printf("no Authorization header, bypass path (path=%s)", httpReq.GetPath())
+			return allowed(), nil
+		}
+		return denied(codes.Unauthenticated, http.StatusUnauthorized, "missing Authorization header"), nil
 	}
 
 	tokenStr := strings.TrimPrefix(authHeader, "Bearer ")

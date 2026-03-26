@@ -79,7 +79,7 @@ Adding a new tool to an existing namespace requires only: 1 Keycloak client + au
 JWT validation and token exchange are both handled in ext_authz (not `RequestAuthentication`) because:
 - Single point of logic — validation and exchange are tightly coupled
 - Meaningful error messages (`{"error": "token expired"}`) vs generic 401
-- Requests without an Authorization header pass through — the ext_authz processes tokens that are present, not enforces authentication. Use DENY/ALLOW policies to require tokens on specific services.
+- Requests without an Authorization header are allowed only on bypass paths (`/.well-known/*`, `/healthz`, `/readyz`, `/livez`). All other unauthenticated requests are rejected. Override via `BYPASS_INBOUND_PATHS` env var (comma-separated, same pattern as AuthBridge).
 - No two-phase problem — the waypoint doesn't need to skip validation of the exchanged token
 
 ## Waypoint Placement

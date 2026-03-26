@@ -18,6 +18,50 @@ REALM="kagenti"
 KC_PORT=18080
 PF_PID=""
 
+# ---------- Cleanup mode ----------
+
+if [[ "${1:-}" == "--cleanup" ]]; then
+  echo "Cleaning up weather agent demo..."
+
+  kubectl delete -f deploy/weather-service.yaml 2>/dev/null && echo "  Deleted weather-service" || true
+  kubectl delete -f deploy/weather-tool-mcp.yaml 2>/dev/null && echo "  Deleted weather-tool" || true
+
+  { lsof -ti tcp:$KC_PORT | xargs kill; } 2>/dev/null || true
+  sleep 1
+  kubectl port-forward -n "$KEYCLOAK_NS" "svc/$KEYCLOAK_SVC" $KC_PORT:8080 &>/dev/null &
+  PF_PID=$!
+  sleep 3
+
+  KC_URL="http://localhost:$KC_PORT"
+  ADMIN_TOKEN=$(curl -sf -X POST "$KC_URL/realms/master/protocol/openid-connect/token" \
+    -d "grant_type=password&client_id=admin-cli&username=admin&password=admin" | jq -r '.access_token')
+
+  EXCHANGE_UUID=$(curl -sf "$KC_URL/admin/realms/$REALM/clients?clientId=token-exchange-service" \
+    -H "Authorization: Bearer $ADMIN_TOKEN" | jq -r '.[0].id')
+
+  for CLIENT in weather-service weather-tool-mcp; do
+    UUID=$(curl -sf "$KC_URL/admin/realms/$REALM/clients?clientId=$CLIENT" \
+      -H "Authorization: Bearer $ADMIN_TOKEN" | jq -r '.[0].id')
+    if [[ -n "$UUID" && "$UUID" != "null" ]]; then
+      curl -sf -o /dev/null -X DELETE "$KC_URL/admin/realms/$REALM/clients/$UUID" \
+        -H "Authorization: Bearer $ADMIN_TOKEN" && echo "  Deleted Keycloak client $CLIENT" || true
+    fi
+  done
+
+  for MAPPER in weather-tool-mcp-audience weather-service-audience; do
+    MAPPER_ID=$(curl -sf "$KC_URL/admin/realms/$REALM/clients/$EXCHANGE_UUID/protocol-mappers/models" \
+      -H "Authorization: Bearer $ADMIN_TOKEN" | jq -r ".[] | select(.name==\"$MAPPER\") | .id")
+    if [[ -n "$MAPPER_ID" && "$MAPPER_ID" != "null" ]]; then
+      curl -sf -o /dev/null -X DELETE "$KC_URL/admin/realms/$REALM/clients/$EXCHANGE_UUID/protocol-mappers/models/$MAPPER_ID" \
+        -H "Authorization: Bearer $ADMIN_TOKEN" && echo "  Deleted audience mapper $MAPPER" || true
+    fi
+  done
+
+  kill "$PF_PID" 2>/dev/null || true
+  echo "  Done."
+  exit 0
+fi
+
 # ---------- Demo helpers ----------
 
 CYAN='\033[1;36m'
@@ -176,7 +220,5 @@ echo ""
 echo "  Weather agent + tool deployed with waypoint security."
 echo "  Use the kagenti UI to chat with the weather agent."
 echo ""
-echo "  To clean up later:"
-echo "    kubectl delete -f deploy/weather-service.yaml"
-echo "    kubectl delete -f deploy/weather-tool-mcp.yaml"
+echo "  To clean up:  bash deploy/11-weather-agent-demo.sh --cleanup"
 echo ""
