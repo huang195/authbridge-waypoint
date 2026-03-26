@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Configure the kagenti Keycloak instance for the authbridge-waypoint PoC.
-# Creates the kagenti realm, registers clients, and enables standard
+# Uses the shared kagenti realm, registers clients, and enables standard
 # token exchange on the token-exchange-service client.
 #
 # Prerequisites: kagenti cluster running with Keycloak 26+ in the keycloak namespace.

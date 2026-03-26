@@ -276,7 +276,7 @@ See the [kagenti repository](https://github.com/kagenti/kagenti) for cluster set
 ```bash
 make up     # build + configure Keycloak + deploy
 make test   # run E2E tests
-make down   # remove everything (K8s resources + Keycloak realm)
+make down   # remove K8s resources + Keycloak clients (realm is shared)
 ```
 
 ## Components
@@ -287,6 +287,13 @@ make down   # remove everything (K8s resources + Keycloak realm)
 | `echo-tool` | `cmd/echo-tool/` | Echoes request headers as JSON — verifies the exchanged token |
 | `time-tool` | `cmd/time-tool/` | Returns current time + JWT claims — second tool for multi-tool demo |
 | `token-exchange-service` | `cmd/token-exchange-service/` | ext_authz gRPC service: JWT validation + RFC 8693 token exchange |
+
+## Demo Scripts
+
+| Script | Description |
+|--------|-------------|
+| `deploy/10-add-tool-demo.sh` | Interactive demo: add a new tool (weather-tool) with zero infra changes |
+| `deploy/11-weather-agent-demo.sh` | Deploy real kagenti weather agent + tool with waypoint security |
 
 ## End-to-End Tests
 
