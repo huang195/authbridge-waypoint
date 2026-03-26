@@ -1,0 +1,95 @@
+---
+# Weather-tool MCP server (kagenti).
+# Unmodified ghcr.io image deployed in tool-ns. The existing tool-waypoint
+# handles token exchange transparently — no sidecar, no secrets in the pod.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: weather-tool
+  namespace: tool-ns
+  labels:
+    app: weather-tool
+    kagenti.io/type: tool
+    protocol.kagenti.io/mcp: ""
+    kagenti.io/transport: streamable_http
+    app.kubernetes.io/name: weather-tool
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: weather-tool
+  template:
+    metadata:
+      labels:
+        app: weather-tool
+        kagenti.io/type: tool
+        protocol.kagenti.io/mcp: ""
+        kagenti.io/transport: streamable_http
+        app.kubernetes.io/name: weather-tool
+        kagenti.io/inject: disabled
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: mcp
+          image: ghcr.io/kagenti/agent-examples/weather_tool:latest
+          imagePullPolicy: Always
+          env:
+            - name: PORT
+              value: "8000"
+            - name: HOST
+              value: "0.0.0.0"
+            - name: UV_NO_CACHE
+              value: "1"
+          ports:
+            - containerPort: 8000
+              name: http
+          readinessProbe:
+            tcpSocket:
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 12
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 1Gi
+          volumeMounts:
+            - name: cache
+              mountPath: /app/.cache
+            - name: tmp
+              mountPath: /tmp
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: cache
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+---
+# Service name is weather-tool-mcp (kagenti convention).
+# This name becomes the Keycloak client ID via the hostname convention.
+apiVersion: v1
+kind: Service
+metadata:
+  name: weather-tool-mcp
+  namespace: tool-ns
+  labels:
+    app: weather-tool
+    kagenti.io/type: tool
+    protocol.kagenti.io/mcp: ""
+    app.kubernetes.io/name: weather-tool
+spec:
+  selector:
+    app: weather-tool
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000

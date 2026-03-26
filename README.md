@@ -79,6 +79,7 @@ Adding a new tool to an existing namespace requires only: 1 Keycloak client + au
 JWT validation and token exchange are both handled in ext_authz (not `RequestAuthentication`) because:
 - Single point of logic — validation and exchange are tightly coupled
 - Meaningful error messages (`{"error": "token expired"}`) vs generic 401
+- Requests without an Authorization header pass through — the ext_authz processes tokens that are present, not enforces authentication. Use DENY/ALLOW policies to require tokens on specific services.
 - No two-phase problem — the waypoint doesn't need to skip validation of the exchanged token
 
 ## Waypoint Placement
@@ -134,14 +135,14 @@ The token-exchange-service calls Keycloak twice during its lifecycle:
 
 **1. JWKS fetch** (background, every 15 minutes):
 ```
-GET /realms/waypoint-poc/protocol/openid-connect/certs
+GET /realms/kagenti/protocol/openid-connect/certs
 → Returns the realm's RSA public keys for JWT signature verification
 ```
 The service caches these keys and uses them to validate every incoming JWT without calling Keycloak per-request.
 
 **2. Token exchange** (per-request, when `aud` is missing the destination):
 ```
-POST /realms/waypoint-poc/protocol/openid-connect/token
+POST /realms/kagenti/protocol/openid-connect/token
 
   grant_type         = urn:ietf:params:oauth:grant-type:token-exchange
   subject_token      = <the agent's JWT>
@@ -157,7 +158,7 @@ Exchanged tokens are cached keyed by `(subject_token_hash, audience)` with TTL =
 
 ### What Keycloak checks during exchange
 
-When the token exchange request arrives, Keycloak validates four things:
+When the token exchange request arrives, Keycloak validates three things:
 
 ```
 1. Is token-exchange-service allowed to call the exchange endpoint?
@@ -182,7 +183,7 @@ The exchanged token has:
 
 The setup script configures Keycloak via the admin REST API. Here's what it creates and why:
 
-**Step 1 — Realm**: Creates `waypoint-poc` realm.
+**Step 1 — Realm**: Uses the existing `kagenti` realm (shared with the kagenti platform). Creates it if not present.
 
 **Step 2 — Four clients:**
 
@@ -207,6 +208,7 @@ Only the **requesting client** needs this attribute. The target audience client 
 | 2 | `demo-agent` | `token-exchange-service` | **Required by Keycloak.** When `token-exchange-service` presents the agent's token as `subject_token`, Keycloak checks that the requesting client (`token-exchange-service`) is in the subject token's `aud`. Without this mapper, the exchange fails. |
 | 3 | `token-exchange-service` | `echo-tool` | When Keycloak issues the exchanged token, this mapper ensures `echo-tool` appears in the `aud` claim. |
 | 4 | `token-exchange-service` | `time-tool` | Same as above for the second tool. Each new tool needs one audience mapper on `token-exchange-service`. |
+| 5 | `kagenti` (platform) | `token-exchange-service` | Allows the kagenti platform (UI/backend) tokens to be exchanged by the ext_authz. Same role as mapper 2, but for the platform client. |
 
 **Step 5 — Verify**: The script obtains an agent token and performs a test exchange to confirm everything is wired correctly.
 

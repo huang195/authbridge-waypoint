@@ -38,7 +38,7 @@ spec:
             - name: ISSUER_URL
               value: "http://keycloak.localtest.me:8080"
             - name: REALM
-              value: "waypoint-poc"
+              value: "kagenti"
             - name: CLIENT_ID
               value: "token-exchange-service"
             - name: CLIENT_SECRET

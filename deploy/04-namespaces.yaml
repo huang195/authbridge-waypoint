@@ -7,6 +7,7 @@ metadata:
   labels:
     istio.io/dataplane-mode: ambient
     istio.io/use-waypoint: agent-waypoint
+    kagenti-enabled: "true"
 ---
 # tool-ns: ambient mode + tool-waypoint for token exchange.
 # All tools share this namespace — adding a tool is just a Deployment.
@@ -17,3 +18,4 @@ metadata:
   labels:
     istio.io/dataplane-mode: ambient
     istio.io/use-waypoint: tool-waypoint
+    kagenti-enabled: "true"

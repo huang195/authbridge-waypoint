@@ -38,7 +38,7 @@ type Config struct {
 	// Keycloak
 	KeycloakURL  string // Internal URL for API calls, e.g. http://keycloak-service.keycloak.svc:8080
 	IssuerURL    string // External issuer URL in tokens, e.g. http://keycloak.localtest.me:8080 (defaults to KeycloakURL)
-	Realm        string // e.g. waypoint-poc
+	Realm        string // e.g. kagenti
 	ClientID     string // token-exchange-service's own client ID
 	ClientSecret string // token-exchange-service's own client secret
 
@@ -125,7 +125,7 @@ func loadConfig() Config {
 	c := Config{
 		KeycloakURL:  envOrDefault("KEYCLOAK_URL", "http://keycloak-service.keycloak.svc.cluster.local:8080"),
 		IssuerURL:    os.Getenv("ISSUER_URL"), // If empty, derived from KeycloakURL
-		Realm:        envOrDefault("REALM", "waypoint-poc"),
+		Realm:        envOrDefault("REALM", "kagenti"),
 		ClientID:     envOrDefault("CLIENT_ID", "token-exchange-service"),
 		ClientSecret: os.Getenv("CLIENT_SECRET"),
 		ListenAddr:   envOrDefault("LISTEN_ADDR", ":9090"),
@@ -167,9 +167,13 @@ func (s *authServer) Check(ctx context.Context, req *auth.CheckRequest) (*auth.C
 	headers := httpReq.GetHeaders()
 
 	// 1. Extract Authorization header
+	// If no token is present, pass through — the ext_authz validates/exchanges
+	// tokens that ARE present, not enforce authentication. Use DENY/ALLOW
+	// policies to require authentication on specific services.
 	authHeader := headers["authorization"]
 	if authHeader == "" {
-		return denied(codes.Unauthenticated, http.StatusUnauthorized, "missing Authorization header"), nil
+		log.Printf("no Authorization header, passing through (path=%s)", httpReq.GetPath())
+		return allowed(), nil
 	}
 
 	tokenStr := strings.TrimPrefix(authHeader, "Bearer ")

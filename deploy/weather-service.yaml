@@ -1,0 +1,102 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: weather-service
+  namespace: agent-ns
+  labels:
+    istio.io/use-waypoint: agent-waypoint
+---
+# Weather-service agent (kagenti A2A/LangGraph).
+# Unmodified ghcr.io image — the waypoint handles token validation
+# on inbound and token exchange on outbound to the tool.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: weather-service
+  namespace: agent-ns
+  labels:
+    app: weather-service
+    kagenti.io/type: agent
+    protocol.kagenti.io/a2a: ""
+    kagenti.io/framework: LangGraph
+    app.kubernetes.io/name: weather-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: weather-service
+  template:
+    metadata:
+      labels:
+        app: weather-service
+        kagenti.io/type: agent
+        protocol.kagenti.io/a2a: ""
+        kagenti.io/framework: LangGraph
+        app.kubernetes.io/name: weather-service
+        kagenti.io/inject: disabled
+    spec:
+      serviceAccountName: weather-service
+      containers:
+        - name: agent
+          image: ghcr.io/kagenti/agent-examples/weather_service:latest
+          imagePullPolicy: Always
+          env:
+            - name: PORT
+              value: "8000"
+            - name: HOST
+              value: "0.0.0.0"
+            - name: MCP_URL
+              value: "http://weather-tool-mcp.tool-ns.svc.cluster.local:8000/mcp"
+            - name: LLM_API_BASE
+              value: "http://host.docker.internal:11434/v1"
+            - name: LLM_API_KEY
+              value: "dummy"
+            - name: LLM_MODEL
+              value: "llama3.2:3b-instruct-fp16"
+            - name: UV_CACHE_DIR
+              value: "/app/.cache/uv"
+          ports:
+            - containerPort: 8000
+              name: http
+          readinessProbe:
+            tcpSocket:
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 12
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 1Gi
+          volumeMounts:
+            - name: cache
+              mountPath: /app/.cache
+            - name: marvin
+              mountPath: /.marvin
+      volumes:
+        - name: cache
+          emptyDir: {}
+        - name: marvin
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: weather-service
+  namespace: agent-ns
+  labels:
+    app: weather-service
+    kagenti.io/type: agent
+    protocol.kagenti.io/a2a: ""
+    app.kubernetes.io/name: weather-service
+spec:
+  selector:
+    app: weather-service
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8000

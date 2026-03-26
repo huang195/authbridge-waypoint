@@ -10,7 +10,7 @@ set -euo pipefail
 
 KEYCLOAK_SVC="${KEYCLOAK_SVC:-keycloak-service}"
 KEYCLOAK_NS="${KEYCLOAK_NS:-keycloak}"
-REALM="waypoint-poc"
+REALM="kagenti"
 TOOL_NAME="weather-tool"
 TOOL_SECRET="weather-secret"
 KC_PORT=18080

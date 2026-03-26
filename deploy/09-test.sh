@@ -34,7 +34,7 @@ set -euo pipefail
 
 KEYCLOAK_SVC="${KEYCLOAK_SVC:-keycloak-service}"
 KEYCLOAK_NS="${KEYCLOAK_NS:-keycloak}"
-REALM="waypoint-poc"
+REALM="kagenti"
 AGENT_TOOL_URL="http://demo-agent.agent-ns.svc.cluster.local:8080/call/echo-tool"
 AGENT_TIME_URL="http://demo-agent.agent-ns.svc.cluster.local:8080/call/time-tool"
 INVALID_TOKEN="invalid-token-12345"
@@ -249,7 +249,7 @@ fi
 echo ""
 info "Test 3: Valid token is exchanged for time-tool (multi-tool)"
 detail "Same user token, different tool → different audience in exchanged token"
-detail "User sends token to demo-agent /call-time → demo-agent forwards to time-tool"
+detail "User sends token to demo-agent /call/time-tool → demo-agent forwards to time-tool"
 detail "→ tool-waypoint ext_authz validates JWT, exchanges via RFC 8693"
 detail "→ time-tool should receive a new token with aud=time-tool"
 echo ""

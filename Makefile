@@ -3,7 +3,7 @@ TAG ?= latest
 GOARCH ?= $(shell go env GOARCH)
 CLUSTER_NAME ?= kagenti
 SERVICES := demo-agent echo-tool time-tool token-exchange-service
-REALM := waypoint-poc
+REALM := kagenti
 KC_PORT := 18080
 
 .PHONY: up test down
@@ -40,26 +40,34 @@ up: ## Build, configure Keycloak, deploy everything
 test: ## Run end-to-end tests
 	bash deploy/09-test.sh
 
-down: ## Remove all PoC resources including Keycloak realm
+WAYPOINT_CLIENTS := demo-agent echo-tool time-tool token-exchange-service
+
+down: ## Remove all PoC resources and Keycloak clients (realm is shared, not deleted)
 	@echo "=== Removing Kubernetes resources ==="
 	-kubectl delete -f deploy/08-workloads.yaml 2>/dev/null
 	-kubectl delete -f deploy/07-istio-policies.yaml 2>/dev/null
 	-kubectl delete -f deploy/06-waypoint.yaml 2>/dev/null
 	-kubectl delete -f deploy/05-token-exchange-svc.yaml 2>/dev/null
 	-kubectl delete ns agent-ns tool-ns 2>/dev/null
-	@echo "=== Removing Keycloak realm ==="
+	@echo "=== Removing Keycloak clients (realm '$(REALM)' is shared) ==="
 	@fuser -k $(KC_PORT)/tcp 2>/dev/null || true; \
 		kubectl port-forward -n keycloak svc/keycloak-service $(KC_PORT):8080 & PF_PID=$$!; \
 		sleep 3; \
 		ADMIN_TOKEN=$$(curl -sf -X POST "http://localhost:$(KC_PORT)/realms/master/protocol/openid-connect/token" \
 			-d "grant_type=password&client_id=admin-cli&username=admin&password=admin" | jq -r '.access_token'); \
 		if [ -n "$$ADMIN_TOKEN" ] && [ "$$ADMIN_TOKEN" != "null" ]; then \
-			curl -sf -X DELETE "http://localhost:$(KC_PORT)/admin/realms/$(REALM)" \
-				-H "Authorization: Bearer $$ADMIN_TOKEN" \
-				&& echo "   Deleted realm '$(REALM)'" \
-				|| echo "   Realm '$(REALM)' already gone"; \
+			for CLIENT in $(WAYPOINT_CLIENTS); do \
+				UUID=$$(curl -sf "http://localhost:$(KC_PORT)/admin/realms/$(REALM)/clients?clientId=$$CLIENT" \
+					-H "Authorization: Bearer $$ADMIN_TOKEN" | jq -r '.[0].id'); \
+				if [ -n "$$UUID" ] && [ "$$UUID" != "null" ]; then \
+					curl -sf -o /dev/null -X DELETE "http://localhost:$(KC_PORT)/admin/realms/$(REALM)/clients/$$UUID" \
+						-H "Authorization: Bearer $$ADMIN_TOKEN" \
+						&& echo "   Deleted client '$$CLIENT'" \
+						|| echo "   Client '$$CLIENT' already gone"; \
+				fi; \
+			done; \
 		else \
-			echo "   WARNING: Could not get admin token — realm not deleted"; \
+			echo "   WARNING: Could not get admin token — clients not deleted"; \
 		fi; \
 		kill $$PF_PID 2>/dev/null || true
 	-rm -rf bin/

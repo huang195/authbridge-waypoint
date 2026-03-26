@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Configure the kagenti Keycloak instance for the authbridge-waypoint PoC.
-# Creates the waypoint-poc realm, registers clients, and enables standard
+# Creates the kagenti realm, registers clients, and enables standard
 # token exchange on the token-exchange-service client.
 #
 # Prerequisites: kagenti cluster running with Keycloak 26+ in the keycloak namespace.
@@ -8,7 +8,7 @@
 set -euo pipefail
 
 KC_URL="${KEYCLOAK_URL:-http://localhost:18080}"
-REALM="waypoint-poc"
+REALM="kagenti"
 ADMIN_USER="${KC_ADMIN_USER:-admin}"
 ADMIN_PASS="${KC_ADMIN_PASS:-admin}"
 
@@ -166,6 +166,13 @@ add_audience_mapper "$AGENT_UUID" "demo-agent-audience" "demo-agent"
 # Agent tokens must also include token-exchange-service in the audience so the
 # exchange service can present them as subject_token in the standard token exchange.
 add_audience_mapper "$AGENT_UUID" "token-exchange-service-audience" "token-exchange-service"
+
+# The kagenti platform client also needs token-exchange-service in its audience
+# so the ext_authz can exchange tokens issued by the kagenti backend/UI.
+KAGENTI_UUID=$(get_client_uuid "kagenti")
+if [[ -n "$KAGENTI_UUID" && "$KAGENTI_UUID" != "null" ]]; then
+  add_audience_mapper "$KAGENTI_UUID" "token-exchange-service-audience" "token-exchange-service"
+fi
 
 # token-exchange-service must list each tool as a valid audience so Keycloak
 # allows exchanging tokens scoped to that tool.
