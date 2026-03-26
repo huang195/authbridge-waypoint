@@ -70,6 +70,7 @@ DIM='\033[2m'
 RESET='\033[0m'
 
 narrate() { echo -e "\n${CYAN}$*${RESET}"; }
+prompt()  { echo -e "${DIM}press enter to continue...${RESET}"; read -r; }
 
 run() {
   printf "\n${GREEN}\$ %s${RESET}" "$*"
@@ -214,11 +215,20 @@ run "kubectl get pods -n agent-ns"
 
 run "kubectl get pods -n tool-ns"
 
-# ---------- Done ----------
+# ---------- Step 3: Use the kagenti UI ----------
 
 echo ""
-echo "  Weather agent + tool deployed with waypoint security."
-echo "  Use the kagenti UI to chat with the weather agent."
+narrate "Step 3: Chat with the weather agent in the kagenti UI"
+echo "  Open the kagenti UI, select weather-service in agent-ns, and send a message."
+echo "  When done, press Enter here to see the token exchange logs."
+prompt
+
+# ---------- Step 4: Show token exchange logs ----------
+
+narrate "Step 4: Token exchange logs"
+
+run "kubectl logs -n kagenti-system -l app=token-exchange-service --tail=30 | grep -v 'JWKS refreshed'"
+
 echo ""
 echo "  To clean up:  bash deploy/11-weather-agent-demo.sh --cleanup"
 echo ""
