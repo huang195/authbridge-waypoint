@@ -7,7 +7,9 @@ package main
 import (
 	"context"
 	"crypto/rsa"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -95,6 +97,15 @@ func main() {
 	log.Printf("bypass paths: %v", bypassPaths)
 
 	cache = &tokenCache{items: make(map[string]cachedToken)}
+
+	// Background cache eviction every 60 seconds
+	go func() {
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			cache.evictExpired()
+		}
+	}()
 
 	jwksURL := fmt.Sprintf("%s/realms/%s/protocol/openid-connect/certs", cfg.KeycloakURL, cfg.Realm)
 	jwks = &jwksCache{
@@ -497,14 +508,25 @@ func (c *tokenCache) set(key, token string, ttl time.Duration) {
 	}
 }
 
-func hashCacheKey(token, audience string) string {
-	// Use a simple hash: last 16 chars of token + audience
-	// (sufficient for a PoC; production would use SHA-256)
-	suffix := token
-	if len(suffix) > 16 {
-		suffix = suffix[len(suffix)-16:]
+func (c *tokenCache) evictExpired() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := time.Now()
+	evicted := 0
+	for k, v := range c.items {
+		if now.After(v.expiresAt) {
+			delete(c.items, k)
+			evicted++
+		}
 	}
-	return suffix + ":" + audience
+	if evicted > 0 {
+		log.Printf("cache eviction: removed %d expired entries, %d remaining", evicted, len(c.items))
+	}
+}
+
+func hashCacheKey(token, audience string) string {
+	h := sha256.Sum256([]byte(token + ":" + audience))
+	return hex.EncodeToString(h[:])
 }
 
 // ---------- ext_authz response helpers ----------

@@ -7,6 +7,7 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -57,7 +58,7 @@ func handleHealthz(w http.ResponseWriter, _ *http.Request) {
 func parseJWTClaims(token string) (map[string]any, error) {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
-		return nil, nil
+		return nil, fmt.Errorf("malformed JWT: expected 3 parts, got %d", len(parts))
 	}
 
 	// Decode base64url payload
