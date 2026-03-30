@@ -1,6 +1,9 @@
-# Zero-Sidecar Agent Access Control via Istio Waypoint + ext_authz
+# Zero-Sidecar Agent Access Control via Shared Token Exchange Service
 
-A proof-of-concept that replaces Kagenti's AuthBridge sidecar architecture (5 containers, ~150-200MB, NET_ADMIN) with **zero sidecars** using Istio ambient mesh waypoints and a shared ext_authz service for RFC 8693 token exchange.
+A proof-of-concept that replaces Kagenti's AuthBridge sidecar architecture (5 containers, ~150-200MB, NET_ADMIN) with **zero sidecars** using a shared token-exchange-service for RFC 8693 token exchange. Two modes, same backend:
+
+- **Waypoint mode** (Istio ambient mesh) — ext_authz filter on the waypoint, no pod-level changes
+- **HTTP proxy mode** (no mesh required) — `HTTP_PROXY` env var on agent pods, no sidecar, no NET_ADMIN
 
 ## Problem Statement
 
@@ -62,8 +65,8 @@ Adding a new tool to an existing namespace requires only: 1 Keycloak client + au
 | Containers per agent pod | 5 (envoy, go-processor, spiffe-helper, 2 init) | 1 |
 | Memory overhead per pod | ~150-200MB | 0 (shared waypoints) |
 | NET_ADMIN / iptables | Required | Not needed |
-| HTTP_PROXY env vars | Required | Not needed |
-| Token exchange | Per-pod sidecar | Shared waypoint ext_authz |
+| HTTP_PROXY env vars | Required | Optional (HTTP proxy mode) or not needed (waypoint mode) |
+| Token exchange | Per-pod sidecar | Shared service (ext_authz or HTTP proxy) |
 | Access control | Sidecar code | Declarative AuthorizationPolicy CRs |
 
 ## Why ext_authz
@@ -286,7 +289,7 @@ make down   # remove K8s resources + Keycloak clients (realm is shared)
 | `demo-agent` | `cmd/demo-agent/` | Receives a user token, forwards it to echo-tool or time-tool |
 | `echo-tool` | `cmd/echo-tool/` | Echoes request headers as JSON — verifies the exchanged token |
 | `time-tool` | `cmd/time-tool/` | Returns current time + JWT claims — second tool for multi-tool demo |
-| `token-exchange-service` | `cmd/token-exchange-service/` | ext_authz gRPC service: JWT validation + RFC 8693 token exchange |
+| `token-exchange-service` | `cmd/token-exchange-service/` | Shared service: JWT validation + RFC 8693 token exchange. Dual interface: gRPC ext_authz (waypoint) + HTTP forward proxy (HTTP_PROXY) |
 
 ## Demo Scripts
 
@@ -302,6 +305,7 @@ make down   # remove K8s resources + Keycloak clients (realm is shared)
 | **Invalid token rejected** | Invalid token → agent-waypoint | ext_authz rejects (HTTP 401) before reaching agent |
 | **Valid token → echo-tool** | Valid token → demo-agent → tool-waypoint | Token exchanged; echo-tool receives `aud=echo-tool`, `sub` preserved |
 | **Valid token → time-tool** | Valid token → demo-agent → tool-waypoint | Token exchanged; time-tool receives `aud=time-tool`, `sub` preserved |
+| **HTTP proxy mode** | Valid token → demo-agent → echo-tool (no mesh, via `HTTP_PROXY`) | Token exchanged via HTTP proxy; same result as waypoint mode |
 
 ```bash
 make test

@@ -5,7 +5,7 @@ Comparison of three architectures for transparent JWT validation (inbound) and R
 | | Waypoint | AuthBridge | Klaviger |
 |---|---|---|---|
 | **Repo** | [authbridge-waypoint](https://github.com/huang195/authbridge-waypoint) | [kagenti-extensions/AuthBridge](https://github.com/kagenti/kagenti-extensions) | [klaviger](https://github.com/grs/klaviger) |
-| **Pattern** | Shared infrastructure (Istio waypoint + ext_authz) | Per-pod sidecar (Envoy + ext_proc + iptables) | Per-pod sidecar (Go binary, forward + reverse proxy) |
+| **Pattern** | Shared infrastructure (waypoint ext_authz or HTTP proxy) | Per-pod sidecar (Envoy + ext_proc + iptables) | Per-pod sidecar (Go binary, forward + reverse proxy) |
 
 ## Hard Constraints
 
