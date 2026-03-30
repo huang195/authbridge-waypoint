@@ -1,7 +1,12 @@
-// token-exchange-service implements Envoy's ext_authz gRPC v3 protocol.
-// It uses the token's aud claim to decide: if aud includes the destination
-// service name, pass through (already authorized); if not, exchange the token
-// for a scoped one via Keycloak RFC 8693. Deployed as a shared service.
+// token-exchange-service implements two interfaces for transparent token
+// validation and RFC 8693 token exchange:
+//
+//  1. Envoy ext_authz gRPC v3 — called by Istio waypoints (ambient mesh)
+//  2. HTTP forward proxy — called via HTTP_PROXY env var (no mesh required)
+//
+// Both interfaces share the same auth logic: if the token's aud includes the
+// destination service name, pass through; if not, exchange via Keycloak.
+// Deployed as a shared service in kagenti-system.
 package main
 
 import (
@@ -45,8 +50,9 @@ type Config struct {
 	ClientID     string // token-exchange-service's own client ID
 	ClientSecret string // token-exchange-service's own client secret
 
-	// gRPC listen address
-	ListenAddr string
+	// Listeners
+	ListenAddr      string // gRPC ext_authz address (e.g. ":9090")
+	ProxyListenAddr string // HTTP forward proxy address (e.g. ":8080", empty = disabled)
 }
 
 // tokenCache caches exchanged tokens to avoid hitting Keycloak on every request.
@@ -74,11 +80,11 @@ type jwksCache struct {
 var defaultBypassPaths = []string{"/.well-known/*", "/healthz", "/readyz", "/livez"}
 
 var (
-	cfg              Config
-	cache            *tokenCache
-	jwks             *jwksCache
-	client           = &http.Client{Timeout: 10 * time.Second}
-	bypassPaths      = defaultBypassPaths
+	cfg         Config
+	cache       *tokenCache
+	jwks        *jwksCache
+	client      = &http.Client{Timeout: 10 * time.Second}
+	bypassPaths = defaultBypassPaths
 )
 
 func main() {
@@ -130,6 +136,21 @@ func main() {
 		}
 	}()
 
+	// Start HTTP forward proxy (if configured)
+	if cfg.ProxyListenAddr != "" {
+		go func() {
+			log.Printf("HTTP forward proxy listening on %s", cfg.ProxyListenAddr)
+			proxySrv := &http.Server{
+				Addr:    cfg.ProxyListenAddr,
+				Handler: http.HandlerFunc(handleProxy),
+			}
+			if err := proxySrv.ListenAndServe(); err != nil {
+				log.Fatalf("HTTP proxy failed: %v", err)
+			}
+		}()
+	}
+
+	// Start gRPC ext_authz server
 	lis, err := net.Listen("tcp", cfg.ListenAddr)
 	if err != nil {
 		log.Fatalf("failed to listen on %s: %v", cfg.ListenAddr, err)
@@ -143,7 +164,7 @@ func main() {
 	healthpb.RegisterHealthServer(srv, healthSrv)
 	healthSrv.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
 
-	log.Printf("token-exchange-service listening on %s", cfg.ListenAddr)
+	log.Printf("gRPC ext_authz listening on %s", cfg.ListenAddr)
 	log.Printf("  keycloak: %s/realms/%s", cfg.KeycloakURL, cfg.Realm)
 	log.Printf("  mode: audience-based (aud includes destination → pass, else → exchange)")
 	if err := srv.Serve(lis); err != nil {
@@ -153,12 +174,13 @@ func main() {
 
 func loadConfig() Config {
 	c := Config{
-		KeycloakURL:  envOrDefault("KEYCLOAK_URL", "http://keycloak-service.keycloak.svc.cluster.local:8080"),
-		IssuerURL:    os.Getenv("ISSUER_URL"), // If empty, derived from KeycloakURL
-		Realm:        envOrDefault("REALM", "kagenti"),
-		ClientID:     envOrDefault("CLIENT_ID", "token-exchange-service"),
-		ClientSecret: os.Getenv("CLIENT_SECRET"),
-		ListenAddr:   envOrDefault("LISTEN_ADDR", ":9090"),
+		KeycloakURL:     envOrDefault("KEYCLOAK_URL", "http://keycloak-service.keycloak.svc.cluster.local:8080"),
+		IssuerURL:       os.Getenv("ISSUER_URL"), // If empty, derived from KeycloakURL
+		Realm:           envOrDefault("REALM", "kagenti"),
+		ClientID:        envOrDefault("CLIENT_ID", "token-exchange-service"),
+		ClientSecret:    os.Getenv("CLIENT_SECRET"),
+		ListenAddr:      envOrDefault("LISTEN_ADDR", ":9090"),
+		ProxyListenAddr: os.Getenv("PROXY_LISTEN_ADDR"), // empty = disabled
 	}
 	if c.IssuerURL == "" {
 		c.IssuerURL = c.KeycloakURL
@@ -184,6 +206,14 @@ func serviceNameFromHost(host string) string {
 	return strings.SplitN(host, ".", 2)[0]
 }
 
+// stripPort removes the port suffix from a host string.
+func stripPort(host string) string {
+	if idx := strings.LastIndex(host, ":"); idx > 0 {
+		return host[:idx]
+	}
+	return host
+}
+
 // ---------- Bypass path matching ----------
 
 // matchBypassPath checks if the request path matches any configured bypass pattern.
@@ -201,6 +231,78 @@ func matchBypassPath(requestPath string) bool {
 	return false
 }
 
+// ---------- Shared auth decision logic ----------
+
+// authDecision represents the result of evaluating an auth request.
+type authDecision struct {
+	action     string // "allow", "allow_with_token", "deny"
+	token      string // exchanged token (if action == "allow_with_token")
+	denyReason string // error message (if action == "deny")
+	denyCode   int    // HTTP status code (if action == "deny")
+}
+
+// evaluateAuth is the shared auth logic used by both the gRPC ext_authz
+// handler and the HTTP forward proxy. It validates the JWT, checks the
+// audience, and performs token exchange if needed.
+func evaluateAuth(ctx context.Context, authHeader, host, reqPath string) *authDecision {
+	// 1. Extract Authorization header
+	if authHeader == "" {
+		if matchBypassPath(reqPath) {
+			log.Printf("no Authorization header, bypass path (path=%s)", reqPath)
+			return &authDecision{action: "allow"}
+		}
+		return &authDecision{action: "deny", denyReason: "missing Authorization header", denyCode: http.StatusUnauthorized}
+	}
+
+	tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
+	if tokenStr == authHeader {
+		return &authDecision{action: "deny", denyReason: "Authorization header must be Bearer token", denyCode: http.StatusUnauthorized}
+	}
+
+	// 2. Validate the JWT
+	claims, err := validateJWT(tokenStr)
+	if err != nil {
+		log.Printf("JWT validation failed: %v", err)
+		return &authDecision{action: "deny", denyReason: fmt.Sprintf("invalid token: %v", err), denyCode: http.StatusUnauthorized}
+	}
+
+	log.Printf("validated JWT for subject=%s, client_id=%s", claims.Subject, claims.ClientID)
+
+	// 3. Derive destination audience from hostname
+	audience := serviceNameFromHost(stripPort(host))
+
+	// 4. If token already authorized for destination, pass through
+	if claims.hasAudience(audience) {
+		log.Printf("token already authorized for %s (aud includes it), passing through", audience)
+		return &authDecision{action: "allow"}
+	}
+
+	log.Printf("token missing audience %s, attempting exchange (token_aud=%v)", audience, claims.Audience)
+
+	// 5. Check cache
+	cacheKey := hashCacheKey(tokenStr, audience)
+	if cached, ok := cache.get(cacheKey); ok {
+		log.Printf("cache hit for audience=%s", audience)
+		return &authDecision{action: "allow_with_token", token: cached}
+	}
+
+	// 6. Perform RFC 8693 token exchange
+	exchangedToken, expiresIn, err := exchangeToken(ctx, tokenStr, audience)
+	if err != nil {
+		log.Printf("token exchange failed: %v", err)
+		return &authDecision{action: "deny", denyReason: fmt.Sprintf("token exchange failed: %v", err), denyCode: http.StatusForbidden}
+	}
+
+	// 7. Cache the exchanged token
+	ttl := time.Duration(expiresIn)*time.Second - 30*time.Second
+	if ttl > 0 {
+		cache.set(cacheKey, exchangedToken, ttl)
+	}
+
+	log.Printf("token exchange succeeded for audience=%s", audience)
+	return &authDecision{action: "allow_with_token", token: exchangedToken}
+}
+
 // ---------- ext_authz gRPC implementation ----------
 
 type authServer struct{}
@@ -212,85 +314,85 @@ func (s *authServer) Check(ctx context.Context, req *auth.CheckRequest) (*auth.C
 	}
 
 	headers := httpReq.GetHeaders()
-
-	// 1. Extract Authorization header
-	authHeader := headers["authorization"]
-	if authHeader == "" {
-		// Only allow unauthenticated requests to bypass paths (health checks, agent card discovery).
-		// All other paths require a Bearer token.
-		if matchBypassPath(httpReq.GetPath()) {
-			log.Printf("no Authorization header, bypass path (path=%s)", httpReq.GetPath())
-			return allowed(), nil
-		}
-		return denied(codes.Unauthenticated, http.StatusUnauthorized, "missing Authorization header"), nil
-	}
-
-	tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
-	if tokenStr == authHeader {
-		return denied(codes.Unauthenticated, http.StatusUnauthorized, "Authorization header must be Bearer token"), nil
-	}
-
-	// 2. Validate the JWT
-	claims, err := validateJWT(tokenStr)
-	if err != nil {
-		log.Printf("JWT validation failed: %v", err)
-		return denied(codes.Unauthenticated, http.StatusUnauthorized, fmt.Sprintf("invalid token: %v", err)), nil
-	}
-
-	log.Printf("validated JWT for subject=%s, client_id=%s", claims.Subject, claims.ClientID)
-
-	// 3. Extract destination host
 	host := headers[":authority"]
 	if host == "" {
 		host = headers["host"]
 	}
-	// Strip port if present
-	if idx := strings.LastIndex(host, ":"); idx > 0 {
-		host = host[:idx]
-	}
 
-	// 4. Audience-based routing: does the token already have access to the destination?
-	//
-	// Derive the destination audience from the hostname (convention: service name = first
-	// segment of FQDN, e.g. "echo-tool.tool-ns.svc.cluster.local" → "echo-tool").
-	//
-	// If the token's aud INCLUDES the destination → pass through (already authorized).
-	// If the token's aud DOES NOT include it → exchange for a scoped token via RFC 8693.
-	//
-	// This naturally handles both inbound and outbound:
-	//   Inbound (user→agent): token aud includes "demo-agent" → pass through
-	//   Outbound (agent→tool): token aud missing "echo-tool" → exchange
-	audience := serviceNameFromHost(host)
+	decision := evaluateAuth(ctx, headers["authorization"], host, httpReq.GetPath())
 
-	if claims.hasAudience(audience) {
-		log.Printf("token already authorized for %s (aud includes it), passing through", audience)
+	switch decision.action {
+	case "allow":
 		return allowed(), nil
+	case "allow_with_token":
+		return allowedWithToken(decision.token), nil
+	default:
+		return denied(codes.Code(codes.Unauthenticated), decision.denyCode, decision.denyReason), nil
+	}
+}
+
+// ---------- HTTP forward proxy ----------
+
+// handleProxy handles HTTP forward proxy requests. Agent pods set
+// HTTP_PROXY=http://token-exchange-service.kagenti-system:8080 and all
+// outbound HTTP traffic is routed here for token exchange.
+func handleProxy(w http.ResponseWriter, r *http.Request) {
+	// Reject CONNECT (HTTPS tunneling) — we only handle plain HTTP
+	if r.Method == http.MethodConnect {
+		log.Printf("[proxy] CONNECT not supported (host=%s)", r.Host)
+		http.Error(w, `{"error":"HTTPS CONNECT not supported — only HTTP proxy"}`, http.StatusMethodNotAllowed)
+		return
 	}
 
-	log.Printf("token missing audience %s, attempting exchange (token_aud=%v)", audience, claims.Audience)
+	// Evaluate auth decision using the same logic as ext_authz
+	decision := evaluateAuth(r.Context(), r.Header.Get("Authorization"), r.Host, r.URL.Path)
 
-	// 5. Check cache
-	cacheKey := hashCacheKey(tokenStr, audience)
-	if cached, ok := cache.get(cacheKey); ok {
-		log.Printf("cache hit for audience=%s", audience)
-		return allowedWithToken(cached), nil
+	switch decision.action {
+	case "deny":
+		body, _ := json.Marshal(map[string]string{"error": decision.denyReason})
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(decision.denyCode)
+		w.Write(body)
+		return
+	case "allow_with_token":
+		r.Header.Set("Authorization", "Bearer "+decision.token)
 	}
 
-	// 6. Perform RFC 8693 token exchange
-	exchangedToken, expiresIn, err := exchangeToken(ctx, tokenStr, audience)
+	// Remove hop-by-hop headers
+	r.Header.Del("Connection")
+	r.Header.Del("Keep-Alive")
+	r.Header.Del("Proxy-Authenticate")
+	r.Header.Del("Proxy-Authorization")
+	r.Header.Del("Proxy-Connection")
+	r.Header.Del("TE")
+	r.Header.Del("Trailer")
+	r.Header.Del("Transfer-Encoding")
+	r.Header.Del("Upgrade")
+
+	// Clear RequestURI — set by the server but must be empty for client requests
+	r.RequestURI = ""
+
+	// Forward the request to the actual destination
+	resp, err := client.Do(r)
 	if err != nil {
-		log.Printf("token exchange failed: %v", err)
-		return denied(codes.PermissionDenied, http.StatusForbidden, fmt.Sprintf("token exchange failed: %v", err)), nil
+		log.Printf("[proxy] failed to forward request to %s: %v", r.Host, err)
+		http.Error(w, `{"error":"bad gateway"}`, http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	// Copy response headers
+	for key, values := range resp.Header {
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
 	}
 
-	// 7. Cache the exchanged token
-	ttl := time.Duration(expiresIn)*time.Second - 30*time.Second
-	if ttl > 0 {
-		cache.set(cacheKey, exchangedToken, ttl)
-	}
+	// Write status code and body
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body)
 
-	log.Printf("token exchange succeeded for audience=%s", audience)
-	return allowedWithToken(exchangedToken), nil
+	log.Printf("[proxy] %s %s → %d", r.Method, r.Host, resp.StatusCode)
 }
 
 // ---------- JWT validation ----------

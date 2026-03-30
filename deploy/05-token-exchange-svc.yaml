@@ -32,6 +32,8 @@ spec:
           ports:
             - containerPort: 9090
               name: grpc
+            - containerPort: 8080
+              name: http-proxy
           env:
             - name: KEYCLOAK_URL
               value: "http://keycloak-service.keycloak.svc.cluster.local:8080"
@@ -48,6 +50,8 @@ spec:
                   key: CLIENT_SECRET
             - name: LISTEN_ADDR
               value: ":9090"
+            - name: PROXY_LISTEN_ADDR
+              value: ":8080"
           readinessProbe:
             grpc:
               port: 9090
@@ -79,3 +83,6 @@ spec:
       targetPort: 9090
       name: grpc
       appProtocol: grpc
+    - port: 8080
+      targetPort: 8080
+      name: http-proxy
