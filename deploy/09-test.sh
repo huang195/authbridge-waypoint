@@ -29,6 +29,7 @@
 #   1. Invalid token → agent-waypoint rejects (ext_authz denies before reaching agent)
 #   2. Valid token → echo-tool: waypoint exchanges → aud=echo-tool
 #   3. Valid token → time-tool: same waypoint exchanges → aud=time-tool
+#   4. Valid token → echo-tool via HTTP proxy (no waypoint): proxy exchanges → aud=echo-tool
 #
 set -euo pipefail
 
@@ -112,6 +113,7 @@ cleanup() {
   kubectl delete pod -n agent-ns curl-invalid --force --grace-period=0 2>/dev/null || true
   kubectl delete pod -n agent-ns curl-valid --force --grace-period=0 2>/dev/null || true
   kubectl delete pod -n agent-ns curl-time --force --grace-period=0 2>/dev/null || true
+  kubectl delete pod -n agent-ns curl-proxy --force --grace-period=0 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -243,12 +245,12 @@ else
 fi
 
 # ==========================================================================
-# Test 3: Valid token is exchanged for time-tool (multi-tool demo)
+# Test 3: Valid token is exchanged for time-tool (second tool, same waypoint)
 # ==========================================================================
 
 echo ""
-info "Test 3: Valid token is exchanged for time-tool (multi-tool)"
-detail "Same user token, different tool → different audience in exchanged token"
+info "Test 3: Valid token is exchanged for time-tool (second tool, same waypoint)"
+detail "Same user token, different tool → proves one waypoint handles N tools"
 detail "User sends token to demo-agent /call/time-tool → demo-agent forwards to time-tool"
 detail "→ tool-waypoint ext_authz validates JWT, exchanges via RFC 8693"
 detail "→ time-tool should receive a new token with aud=time-tool"
@@ -286,6 +288,70 @@ else
     detail "  sub: $USER_SUB → $RECEIVED_SUB (preserved)"
   else
     fail "Unexpected audience: $RECEIVED_AUD (expected time-tool)"
+  fi
+fi
+
+# ==========================================================================
+# Test 4: HTTP proxy mode — token exchange without waypoint
+# ==========================================================================
+
+echo ""
+info "Test 4: HTTP proxy mode — token exchange via HTTP_PROXY (no waypoint)"
+detail "Same user token, but routed through the HTTP forward proxy"
+detail "instead of the Istio waypoint ext_authz."
+echo ""
+print_token_info "User token (before exchange)" "$USER_TOKEN"
+echo ""
+
+PROXY_URL="http://token-exchange-service.kagenti-system.svc.cluster.local:8080"
+TOOL_URL="http://echo-tool.tool-ns.svc.cluster.local:8080/"
+
+kubectl delete pod -n agent-ns curl-proxy --force --grace-period=0 2>/dev/null || true
+
+kubectl run curl-proxy -n agent-ns \
+  --image=curlimages/curl:latest \
+  --restart=Never \
+  --command -- sh -c \
+  "curl -s --proxy '${PROXY_URL}' -H 'Authorization: Bearer ${USER_TOKEN}' '${TOOL_URL}'" \
+  2>/dev/null
+
+kubectl wait --for=condition=ready "pod/curl-proxy" -n agent-ns --timeout=30s 2>/dev/null || true
+sleep 5
+
+CURL_BODY=$(kubectl logs -n agent-ns curl-proxy 2>&1) || true
+kubectl delete pod -n agent-ns curl-proxy --force --grace-period=0 2>/dev/null || true
+
+TOOL_RESPONSE=$(echo "$CURL_BODY" | jq -r '.' 2>/dev/null)
+
+if [[ -z "$TOOL_RESPONSE" || "$TOOL_RESPONSE" == "null" ]]; then
+  fail "No response from echo-tool via proxy"
+  detail "Response: $CURL_BODY"
+else
+  RECEIVED_AUTH=$(echo "$CURL_BODY" | jq -r '.headers.Authorization // .headers.authorization // empty')
+
+  if [[ -z "$RECEIVED_AUTH" ]]; then
+    fail "echo-tool did not receive an Authorization header via proxy"
+  else
+    RECEIVED_TOKEN=$(echo "$RECEIVED_AUTH" | sed 's/Bearer //')
+
+    print_token_info "Token received by echo-tool (via proxy, after exchange)" "$RECEIVED_TOKEN"
+    echo ""
+
+    RECEIVED_AUD=$(jwt_payload "$RECEIVED_TOKEN" | jq -r '.aud // "unknown"')
+    RECEIVED_AZP=$(jwt_payload "$RECEIVED_TOKEN" | jq -r '.azp // "unknown"')
+    RECEIVED_SUB=$(jwt_payload "$RECEIVED_TOKEN" | jq -r '.sub // "unknown"')
+
+    if [[ "$RECEIVED_TOKEN" == "$USER_TOKEN" ]]; then
+      fail "Token was NOT exchanged — echo-tool received the original token via proxy"
+    elif echo "$RECEIVED_AUD" | grep -q "echo-tool"; then
+      ok "Proxy mode: token exchanged — echo-tool received aud=$RECEIVED_AUD"
+      detail "Exchange summary (via HTTP proxy, no waypoint):"
+      detail "  aud: [$USER_AUD] → $RECEIVED_AUD"
+      detail "  azp: $USER_AZP → $RECEIVED_AZP"
+      detail "  sub: $USER_SUB → $RECEIVED_SUB (preserved)"
+    else
+      fail "Unexpected audience via proxy: $RECEIVED_AUD (expected echo-tool)"
+    fi
   fi
 fi
 
