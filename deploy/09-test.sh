@@ -29,7 +29,7 @@
 #   1. Invalid token → agent-waypoint rejects (ext_authz denies before reaching agent)
 #   2. Valid token → echo-tool: waypoint exchanges → aud=echo-tool
 #   3. Valid token → time-tool: same waypoint exchanges → aud=time-tool
-#   4. Valid token → echo-tool via HTTP proxy (no waypoint): proxy exchanges → aud=echo-tool
+#   4. Full E2E via HTTP_PROXY (no ambient mesh): user → agent → tool, proxy exchanges
 #
 set -euo pipefail
 
@@ -108,12 +108,14 @@ run_curl() {
   kubectl delete pod -n agent-ns "$pod_name" --force --grace-period=0 2>/dev/null || true
 }
 
+PROXY_TEST_NS="proxy-test-ns"
+
 cleanup() {
   [[ -n "$PF_PID" ]] && kill "$PF_PID" 2>/dev/null || true
   kubectl delete pod -n agent-ns curl-invalid --force --grace-period=0 2>/dev/null || true
   kubectl delete pod -n agent-ns curl-valid --force --grace-period=0 2>/dev/null || true
   kubectl delete pod -n agent-ns curl-time --force --grace-period=0 2>/dev/null || true
-  kubectl delete pod -n agent-ns curl-proxy --force --grace-period=0 2>/dev/null || true
+  kubectl delete ns "$PROXY_TEST_NS" --force --grace-period=0 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -292,49 +294,143 @@ else
 fi
 
 # ==========================================================================
-# Test 4: HTTP proxy mode — token exchange without waypoint
+# Test 4: HTTP proxy mode — full E2E without ambient mesh
 # ==========================================================================
 
 echo ""
-info "Test 4: HTTP proxy mode — token exchange via HTTP_PROXY (no waypoint)"
-detail "Same user token, but routed through the HTTP forward proxy"
-detail "instead of the Istio waypoint ext_authz."
-echo ""
-print_token_info "User token (before exchange)" "$USER_TOKEN"
+info "Test 4: HTTP proxy mode — user → agent → tool (no ambient mesh)"
+detail "Deploy demo-agent + echo-tool in a non-ambient namespace"
+detail "Both use HTTP_PROXY for token exchange instead of waypoint"
 echo ""
 
 PROXY_URL="http://token-exchange-service.kagenti-system.svc.cluster.local:8080"
-TOOL_URL="http://echo-tool.tool-ns.svc.cluster.local:8080/"
 
-kubectl delete pod -n agent-ns curl-proxy --force --grace-period=0 2>/dev/null || true
+# Create a non-ambient namespace (no istio labels)
+kubectl create ns "$PROXY_TEST_NS" 2>/dev/null || true
 
-kubectl run curl-proxy -n agent-ns \
+# Deploy echo-tool in proxy-test-ns (no ambient, no waypoint)
+kubectl apply -n "$PROXY_TEST_NS" -f - <<'PROXY_TOOL_EOF'
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-tool
+  labels:
+    app: echo-tool
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: echo-tool
+  template:
+    metadata:
+      labels:
+        app: echo-tool
+    spec:
+      containers:
+        - name: echo-tool
+          image: localhost:5000/echo-tool:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo-tool
+spec:
+  selector:
+    app: echo-tool
+  ports:
+    - port: 8080
+      targetPort: 8080
+PROXY_TOOL_EOF
+
+# Deploy demo-agent in proxy-test-ns with HTTP_PROXY
+kubectl apply -n "$PROXY_TEST_NS" -f - <<PROXY_AGENT_EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-agent
+  labels:
+    app: demo-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: demo-agent
+  template:
+    metadata:
+      labels:
+        app: demo-agent
+    spec:
+      containers:
+        - name: demo-agent
+          image: localhost:5000/demo-agent:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          env:
+            - name: TOOL_NS
+              value: "$PROXY_TEST_NS"
+            - name: HTTP_PROXY
+              value: "$PROXY_URL"
+            - name: NO_PROXY
+              value: "localhost,127.0.0.1"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: demo-agent
+spec:
+  selector:
+    app: demo-agent
+  ports:
+    - port: 8080
+      targetPort: 8080
+PROXY_AGENT_EOF
+
+detail "Waiting for pods in $PROXY_TEST_NS (no ambient mesh)..."
+kubectl wait --for=condition=ready pod -l app=echo-tool -n "$PROXY_TEST_NS" --timeout=60s 2>/dev/null
+kubectl wait --for=condition=ready pod -l app=demo-agent -n "$PROXY_TEST_NS" --timeout=60s 2>/dev/null
+
+# Verify no ambient mesh — no waypoint, no ztunnel interception
+detail "Namespace $PROXY_TEST_NS has NO ambient mesh labels"
+
+print_token_info "User token (before exchange)" "$USER_TOKEN"
+echo ""
+
+# Call agent → agent calls tool via HTTP_PROXY → proxy exchanges token
+PROXY_AGENT_URL="http://demo-agent.$PROXY_TEST_NS.svc.cluster.local:8080/call/echo-tool"
+kubectl delete pod -n "$PROXY_TEST_NS" curl-proxy --force --grace-period=0 2>/dev/null || true
+
+kubectl run curl-proxy -n "$PROXY_TEST_NS" \
   --image=curlimages/curl:latest \
   --restart=Never \
   --command -- sh -c \
-  "curl -s --proxy '${PROXY_URL}' -H 'Authorization: Bearer ${USER_TOKEN}' '${TOOL_URL}'" \
+  "curl -s -H 'Authorization: Bearer ${USER_TOKEN}' '${PROXY_AGENT_URL}'" \
   2>/dev/null
 
-kubectl wait --for=condition=ready "pod/curl-proxy" -n agent-ns --timeout=30s 2>/dev/null || true
+kubectl wait --for=condition=ready "pod/curl-proxy" -n "$PROXY_TEST_NS" --timeout=30s 2>/dev/null || true
 sleep 5
 
-CURL_BODY=$(kubectl logs -n agent-ns curl-proxy 2>&1) || true
-kubectl delete pod -n agent-ns curl-proxy --force --grace-period=0 2>/dev/null || true
+CURL_BODY=$(kubectl logs -n "$PROXY_TEST_NS" curl-proxy 2>&1) || true
 
-TOOL_RESPONSE=$(echo "$CURL_BODY" | jq -r '.' 2>/dev/null)
+TOOL_STATUS=$(echo "$CURL_BODY" | jq -r '.tool_status // empty' 2>/dev/null)
 
-if [[ -z "$TOOL_RESPONSE" || "$TOOL_RESPONSE" == "null" ]]; then
-  fail "No response from echo-tool via proxy"
+if [[ "$TOOL_STATUS" != "200" ]]; then
+  fail "Proxy mode: expected tool_status 200, got $TOOL_STATUS"
   detail "Response: $CURL_BODY"
+  detail "Debug: kubectl logs -n kagenti-system -l app=token-exchange-service --tail=10"
 else
-  RECEIVED_AUTH=$(echo "$CURL_BODY" | jq -r '.headers.Authorization // .headers.authorization // empty')
+  TOOL_RESPONSE=$(echo "$CURL_BODY" | jq -r '.tool_response_raw // empty' 2>/dev/null)
+  RECEIVED_AUTH=$(echo "$TOOL_RESPONSE" | jq -r '.headers.Authorization // .headers.authorization // empty')
 
   if [[ -z "$RECEIVED_AUTH" ]]; then
     fail "echo-tool did not receive an Authorization header via proxy"
   else
     RECEIVED_TOKEN=$(echo "$RECEIVED_AUTH" | sed 's/Bearer //')
 
-    print_token_info "Token received by echo-tool (via proxy, after exchange)" "$RECEIVED_TOKEN"
+    print_token_info "Token received by echo-tool (via proxy, no mesh)" "$RECEIVED_TOKEN"
     echo ""
 
     RECEIVED_AUD=$(jwt_payload "$RECEIVED_TOKEN" | jq -r '.aud // "unknown"')
@@ -342,10 +438,10 @@ else
     RECEIVED_SUB=$(jwt_payload "$RECEIVED_TOKEN" | jq -r '.sub // "unknown"')
 
     if [[ "$RECEIVED_TOKEN" == "$USER_TOKEN" ]]; then
-      fail "Token was NOT exchanged — echo-tool received the original token via proxy"
+      fail "Token was NOT exchanged via proxy"
     elif echo "$RECEIVED_AUD" | grep -q "echo-tool"; then
-      ok "Proxy mode: token exchanged — echo-tool received aud=$RECEIVED_AUD"
-      detail "Exchange summary (via HTTP proxy, no waypoint):"
+      ok "Proxy mode: user → agent → tool, token exchanged (aud=$RECEIVED_AUD)"
+      detail "Exchange summary (HTTP_PROXY, no ambient mesh):"
       detail "  aud: [$USER_AUD] → $RECEIVED_AUD"
       detail "  azp: $USER_AZP → $RECEIVED_AZP"
       detail "  sub: $USER_SUB → $RECEIVED_SUB (preserved)"
