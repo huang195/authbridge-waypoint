@@ -311,6 +311,50 @@ make down   # remove K8s resources + Keycloak clients (realm is shared)
 make test
 ```
 
+## Troubleshooting
+
+### Waypoint tests fail but HTTP proxy tests pass
+
+**Symptom:** Tests 1-3 (waypoint/ext_authz path) fail with empty responses, while Test 4 (HTTP proxy mode) passes. The waypoint logs show only XDS reconnections with no application traffic.
+
+**Cause:** Expired mTLS certificates in the Istio ambient mesh. The ztunnel logs will show:
+
+```
+error  h2 failed: received fatal alert: CertificateExpired
+```
+
+This happens when the waypoint pods and ztunnel have been running long enough for their workload certificates to expire without automatic renewal (e.g., if istiod was restarted or the cluster was suspended).
+
+**Fix:** Restart the waypoints and ztunnel to force certificate renewal:
+
+```bash
+kubectl rollout restart deployment -n agent-ns agent-waypoint
+kubectl rollout restart deployment -n tool-ns tool-waypoint
+kubectl rollout restart daemonset -n istio-system ztunnel
+```
+
+**Diagnosis:** Check ztunnel logs for certificate errors:
+
+```bash
+kubectl logs -n istio-system -l app=ztunnel | grep -i "CertificateExpired"
+```
+
+### Token exchange returns empty response
+
+If `tool_status` is empty in the test output, the request likely never reached `demo-agent`. Check:
+
+1. **Waypoint is programmed:** `kubectl get gtw -n agent-ns` should show `PROGRAMMED=True`
+2. **Namespace labels are correct:** `kubectl get ns agent-ns -o jsonpath='{.metadata.labels}'` should include `istio.io/dataplane-mode: ambient` and `istio.io/use-waypoint: agent-waypoint`
+3. **ext_authz service is running:** `kubectl get pods -n kagenti-system -l app=token-exchange-service`
+
+### Keycloak token acquisition fails
+
+If the test script can't obtain a token from Keycloak:
+
+1. **Port-forward conflict:** Kill stale port-forwards: `lsof -ti tcp:18080 | xargs kill`
+2. **Keycloak not ready:** `kubectl wait --for=condition=ready pod -l app=keycloak -n keycloak --timeout=60s`
+3. **Client misconfigured:** Re-run `make up` to reconfigure Keycloak clients
+
 ## Known Constraints
 
 1. **Waypoints are destination-side only** — Istio waypoints intercept traffic going TO services, not FROM. Outbound token exchange requires a waypoint in the tool namespace.

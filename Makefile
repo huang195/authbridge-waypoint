@@ -6,7 +6,12 @@ SERVICES := demo-agent echo-tool time-tool token-exchange-service
 REALM := kagenti
 KC_PORT := 18080
 
-.PHONY: up test down
+.PHONY: help up test down
+
+.DEFAULT_GOAL := help
+
+help: ## Show this help
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-15s %s\n", $$1, $$2}'
 
 up: ## Build, configure Keycloak, deploy everything
 	@if ! kind get clusters 2>/dev/null | grep -qx '$(CLUSTER_NAME)'; then \
@@ -24,7 +29,7 @@ up: ## Build, configure Keycloak, deploy everything
 		kind load docker-image $(REGISTRY)/$$svc:$(TAG) --name $(CLUSTER_NAME) 2>&1 | grep -v "^enabling"; \
 	done
 	@echo "=== Configuring Keycloak ==="
-	@fuser -k $(KC_PORT)/tcp 2>/dev/null || true; \
+	@lsof -ti tcp:$(KC_PORT) | xargs kill 2>/dev/null || true; \
 		kubectl port-forward -n keycloak svc/keycloak-service $(KC_PORT):8080 & PF_PID=$$!; \
 		sleep 5; \
 		bash deploy/03-keycloak-setup.sh; \
@@ -50,7 +55,7 @@ down: ## Remove all PoC resources and Keycloak clients (realm is shared, not del
 	-kubectl delete -f deploy/05-token-exchange-svc.yaml 2>/dev/null
 	-kubectl delete ns agent-ns tool-ns 2>/dev/null
 	@echo "=== Removing Keycloak clients (realm '$(REALM)' is shared) ==="
-	@fuser -k $(KC_PORT)/tcp 2>/dev/null || true; \
+	@lsof -ti tcp:$(KC_PORT) | xargs kill 2>/dev/null || true; \
 		kubectl port-forward -n keycloak svc/keycloak-service $(KC_PORT):8080 & PF_PID=$$!; \
 		sleep 3; \
 		ADMIN_TOKEN=$$(curl -sf -X POST "http://localhost:$(KC_PORT)/realms/master/protocol/openid-connect/token" \
