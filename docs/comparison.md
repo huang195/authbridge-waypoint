@@ -7,12 +7,13 @@ Comparison of four architectures for transparent JWT validation (inbound) and RF
 | | Shared Proxy | Waypoint | AuthBridge | Klaviger |
 |---|---|---|---|---|
 | **How it works** | Agent pods set `HTTP_PROXY` pointing to a shared token-exchange-service. No mesh, no sidecar. | Istio waypoint calls a shared token-exchange-service via ext_authz. No sidecar. | Per-pod Envoy sidecar + go-processor + iptables intercept all traffic. | Per-pod Go binary acts as forward + reverse proxy via `HTTP_PROXY`. |
-| **Containers per pod** | **1** | **1** | 3 | 2 |
-| **Per-pod memory overhead** | **0** | **0** | ~200Mi | ~64Mi |
-| **Requires NET_ADMIN** | **No** | **No** | Yes | No |
-| **Requires service mesh** | **No** | Yes (Istio ambient) | No | No |
-| **Exchange credentials in pod** | **No** | **No** | Yes | Yes |
-| **Patch exchange logic** | **1 rollout** | **1 rollout** | Restart all pods | Restart all pods |
+| **Containers per pod** | 🟢 1 | 🟢 1 | 🔴 3 | 🟡 2 |
+| **Per-pod memory overhead** | 🟢 0 | 🟢 0 | 🔴 ~200Mi | 🟡 ~64Mi |
+| **Requires NET_ADMIN** | 🟢 No | 🟢 No | 🔴 Yes | 🟢 No |
+| **Requires service mesh** | 🟢 No | 🟡 Yes (Istio ambient) | 🟢 No | 🟢 No |
+| **Exchange credentials in pod** | 🟢 No | 🟢 No | 🔴 Yes | 🔴 Yes |
+| **Patch exchange logic** | 🟢 1 rollout | 🟢 1 rollout | 🔴 Restart all pods | 🔴 Restart all pods |
+| **Outbound coverage** | 🟡 Proxy-aware HTTP only | 🟢 All HTTP (via waypoint) | 🟢 All HTTP (via iptables) | 🟡 Proxy-aware HTTP only |
 | **Pattern** | Shared HTTP proxy | Shared ext_authz on waypoint | Per-pod sidecar | Per-pod sidecar |
 
 The Shared Proxy and Waypoint approaches use the **same backend service** — one codebase, two interfaces. Start with Shared Proxy (no mesh dependency), migrate to Waypoint when ambient mesh is adopted.
