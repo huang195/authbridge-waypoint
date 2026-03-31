@@ -6,6 +6,7 @@ Comparison of four architectures for transparent JWT validation (inbound) and RF
 
 | | Shared Proxy | Waypoint | AuthBridge | Klaviger |
 |---|---|---|---|---|
+| **How it works** | Agent pods set `HTTP_PROXY` pointing to a shared token-exchange-service. No mesh, no sidecar. | Istio waypoint calls a shared token-exchange-service via ext_authz. No sidecar. | Per-pod Envoy sidecar + go-processor + iptables intercept all traffic. | Per-pod Go binary acts as forward + reverse proxy via `HTTP_PROXY`. |
 | **Containers per pod** | **1** | **1** | 3 | 2 |
 | **Per-pod memory overhead** | **0** | **0** | ~200Mi | ~64Mi |
 | **Requires NET_ADMIN** | **No** | **No** | Yes | No |
