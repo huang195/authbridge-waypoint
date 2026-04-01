@@ -32,6 +32,22 @@ Token exchange requires a client secret to authenticate to Keycloak. Where that 
 
 ---
 
+## Agent Identity During Token Exchange
+
+The sidecar model authenticates to Keycloak *as the agent* (same pod, same identity). The shared service authenticates *as itself*. This affects per-agent policy enforcement and audit granularity.
+
+| | Shared Proxy | Waypoint | AuthBridge | Klaviger |
+|---|---|---|---|---|
+| **Keycloak client_id used for exchange** | 🟡 `token-exchange-service` (shared) | 🟡 `token-exchange-service` (shared) | 🟢 Agent's own client ID | 🟢 Agent's own client ID |
+| **Exchanged token `azp`** | 🟡 `token-exchange-service` | 🟡 `token-exchange-service` | 🟢 Agent name | 🟢 Agent name |
+| **Per-agent exchange policy in Keycloak** | 🔴 No — all agents share one client | 🔴 No — all agents share one client | 🟢 Yes | 🟢 Yes |
+| **Agent identity in audit trail** | 🟡 Via source IP → pod lookup | 🟢 Via SPIFFE principal (ztunnel mTLS) | 🟢 Via SPIFFE ID / client_id | 🟢 Via service account |
+| **Per-agent revocation** | 🔴 Disable service = disable all agents | 🔴 Disable service = disable all agents | 🟢 Revoke one client | 🟢 Revoke one client |
+
+**Mitigation (not yet implemented):** Use RFC 8693 `actor_token` to include the agent's identity in the exchange request. The shared service would derive agent identity from the SPIFFE principal (waypoint mode) or source IP → pod → service account lookup (proxy mode), and pass it as `actor_token`. The exchanged token would then carry a nested `act` claim identifying the agent.
+
+---
+
 ## Resource Cost (5000 pods, 20 namespaces)
 
 | | Shared Proxy | Waypoint | AuthBridge | Klaviger |
