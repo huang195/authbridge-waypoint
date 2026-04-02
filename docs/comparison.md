@@ -11,24 +11,11 @@ Comparison of four architectures for transparent JWT validation (inbound) and RF
 | **Per-pod memory overhead** | 🟢 0 | 🟢 0 | 🔴 ~200Mi | 🟡 ~64Mi |
 | **Requires NET_ADMIN** | 🟢 No | 🟢 No | 🔴 Yes | 🟢 No |
 | **Requires service mesh** | 🟢 No | 🟡 Yes (Istio ambient) | 🟢 No | 🟢 No |
-| **Exchange credentials in pod** | 🟢 No | 🟢 No | 🔴 Yes | 🔴 Yes |
 | **Patch exchange logic** | 🟢 1 rollout | 🟢 1 rollout | 🔴 Restart all pods | 🔴 Restart all pods |
 | **Outbound coverage** | 🟡 Proxy-aware HTTP only | 🟢 All HTTP (via waypoint) | 🟢 All HTTP (via iptables) | 🟡 Proxy-aware HTTP only |
 | **Pattern** | Shared HTTP proxy | Shared ext_authz on waypoint | Per-pod sidecar | Per-pod sidecar |
 
 The Shared Proxy and Waypoint approaches use the **same backend service** — one codebase, two interfaces. Start with Shared Proxy (no mesh dependency), migrate to Waypoint when ambient mesh is adopted.
-
----
-
-## Credential Isolation
-
-Token exchange requires a client secret to authenticate to Keycloak. Where that secret lives determines the blast radius of a compromised pod.
-
-| | Shared Proxy | Waypoint | AuthBridge | Klaviger |
-|---|---|---|---|---|
-| **Exchange credentials location** | Shared proxy pod in `kagenti-system` | Shared ext_authz pod in `kagenti-system` | Every app pod (Secret mount or `/shared/` file) | Every app pod (config file or env var) |
-| **App pod has access to exchange secret** | No | No | Yes | Yes |
-| **Compromised app can steal exchange credentials** | No | No | Yes | Yes |
 
 ---
 
